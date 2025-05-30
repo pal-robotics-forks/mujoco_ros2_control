@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(Threads REQUIRED)
+find_package(rclcpp REQUIRED)
 
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
@@ -96,6 +97,10 @@ target_include_directories(mujoco_simulate PUBLIC
   ${MUJOCO_INCLUDE_DIR})
 target_compile_features(mujoco_simulate PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
+ament_target_dependencies(mujoco_simulate
+  rclcpp
+)
+
 target_link_libraries(mujoco_simulate 
   ${MUJOCO_LIB}
   mujoco::libsimulate
@@ -105,6 +110,11 @@ target_link_libraries(mujoco_simulate
 
 install(TARGETS mujoco_simulate
   DESTINATION lib/${PROJECT_NAME})
+
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -30,6 +30,9 @@
 #include "simulate.h"
 #include "array_safety.h"
 
+// ros includes
+#include <rclcpp/rclcpp.hpp>
+
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
 extern "C" {
@@ -433,11 +436,12 @@ void PhysicsLoop(mj::Simulate& sim) {
 
 //-------------------------------------- physics_thread --------------------------------------------
 
-void PhysicsThread(mj::Simulate* sim, const char* filename) {
+void PhysicsThread(mj::Simulate* sim, std::string filename) {
   // request loadmodel if file given (otherwise drag-and-drop)
-  if (filename != nullptr) {
-    sim->LoadMessage(filename);
-    m = LoadModel(filename, *sim);
+  if (!filename.empty()) {
+    auto filename_c_str = filename.c_str();
+    sim->LoadMessage(filename_c_str);
+    m = LoadModel(filename_c_str, *sim);
     if (m) {
       // lock the sim mutex
       const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
@@ -445,7 +449,7 @@ void PhysicsThread(mj::Simulate* sim, const char* filename) {
       d = mj_makeData(m);
     }
     if (d) {
-      sim->Load(m, d, filename);
+      sim->Load(m, d, filename_c_str);
 
       // lock the sim mutex
       const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
@@ -477,6 +481,11 @@ __attribute__((used, visibility("default"))) extern "C" void _mj_rosettaError(co
 
 // run event loop
 int main(int argc, char** argv) {
+
+  rclcpp::init(argc, argv);
+  auto simulation_node = std::make_shared<rclcpp::Node>("mujoco_simulate");
+  simulation_node->declare_parameter("model_path", "");
+  std::string filename = simulation_node->get_parameter("model_path").as_string();
 
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)
@@ -510,10 +519,12 @@ int main(int argc, char** argv) {
       &cam, &opt, &pert, /* is_passive = */ false
   );
 
-  const char* filename = nullptr;
-  if (argc >  1) {
-    filename = argv[1];
-  }
+  // const char* filename = nullptr;
+  // if (argc >  1) {
+  //   filename = argv[1];
+  // }
+
+
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), filename);
@@ -521,6 +532,8 @@ int main(int argc, char** argv) {
   // start simulation UI loop (blocking call)
   sim->RenderLoop();
   physicsthreadhandle.join();
+
+  rclcpp::shutdown();
 
   return 0;
 }
