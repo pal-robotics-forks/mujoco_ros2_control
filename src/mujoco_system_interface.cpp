@@ -219,10 +219,10 @@ MujocoSystemInterface::~MujocoSystemInterface()
 }
 
 // simulate in background thread (while rendering in main thread)
-void MujocoSystemInterface::PhysicsLoop(mujoco::Simulate& sim)
+void MujocoSystemInterface::PhysicsLoop(mj::Simulate& sim)
 {
   // cpu-sim syncronization point
-  std::chrono::time_point<mujoco::Simulate::Clock> syncCPU;
+  std::chrono::time_point<mj::Simulate::Clock> syncCPU;
   mjtNum syncSim = 0;
 
   // run until asked to exit
@@ -295,7 +295,7 @@ void MujocoSystemInterface::PhysicsLoop(mujoco::Simulate& sim)
           bool stepped = false;
 
           // record cpu time at start of iteration
-          const auto startCPU = mujoco::Simulate::Clock::now();
+          const auto startCPU = mj::Simulate::Clock::now();
 
           // elapsed CPU and simulation time since last sync
           const auto elapsedCPU = startCPU - syncCPU;
@@ -321,7 +321,7 @@ void MujocoSystemInterface::PhysicsLoop(mujoco::Simulate& sim)
             const char* message = Diverged(mj_model_->opt.disableflags, mj_data_);
             if (message) {
               sim_->run = 0;
-              mujoco::sample_util::strcpy_arr(sim_->load_error, message);
+              mju::strcpy_arr(sim_->load_error, message);
             } else {
               stepped = true;
             }
@@ -335,8 +335,8 @@ void MujocoSystemInterface::PhysicsLoop(mujoco::Simulate& sim)
             double refreshTime = simRefreshFraction/sim_->refresh_rate;
 
             // step while sim lags behind cpu and within refreshTime
-            while (Seconds((mj_data_->time - syncSim)*slowdown) < mujoco::Simulate::Clock::now() - syncCPU &&
-                   mujoco::Simulate::Clock::now() - startCPU < Seconds(refreshTime)) {
+            while (Seconds((mj_data_->time - syncSim)*slowdown) < mj::Simulate::Clock::now() - syncCPU &&
+                   mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime)) {
               // measure slowdown before first step
               if (!measured && elapsedSim) {
                 sim_->measured_slowdown =
@@ -352,7 +352,7 @@ void MujocoSystemInterface::PhysicsLoop(mujoco::Simulate& sim)
               const char* message = Diverged(mj_model_->opt.disableflags, mj_data_);
               if (message) {
                 sim_->run = 0;
-                mujoco::sample_util::strcpy_arr(sim_->load_error, message);
+                mju::strcpy_arr(sim_->load_error, message);
               } else {
                 stepped = true;
               }
@@ -416,10 +416,10 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_init(
   std::future<void> sim_ready_future = sim_ready->get_future();
 
   // Launch the UI loop in the background
-  ui_thread_ = std::thread([this, sim_ready]() {
-
-    sim_ = std::make_unique<mujoco::Simulate>(
-      std::make_unique<mujoco::GlfwAdapter>(),
+  ui_thread_ = std::thread([this, sim_ready]()
+  {
+    sim_ = std::make_unique<mj::Simulate>(
+      std::make_unique<mj::GlfwAdapter>(),
       &cam_, &opt_, &pert_, /* is_passive = */ false
     );
     // Notify sim that we are ready
@@ -468,7 +468,9 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_init(
   hw_efforts_.assign(n_joints_, 0.0);
   hw_commands_.assign(n_joints_, 0.0);
 
-  for (size_t i = 0; i < n_joints_; ++i) {
+  // Configure joint information
+  for (size_t i = 0; i < n_joints_; ++i)
+  {
     joint_names_[i] = system_info_.joints[i].name;
 
     // Precompute joint_id and actuator_id for faster read/write:
@@ -486,6 +488,21 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_init(
       return hardware_interface::CallbackReturn::ERROR;
     }
   }
+
+  // When the interface is activated, we start the physics engine.
+  physics_thread_ = std::thread([this]()
+  {
+    // Load the simulation and do an initial forward pass
+    RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Starting the mujoco physics thread...");
+    sim_->Load(mj_model_, mj_data_, model_path_.c_str());
+    // lock the sim mutex
+    {
+      const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+      mj_forward(mj_model_, mj_data_);
+    }
+    // Blocks until terminated
+    PhysicsLoop(*sim_);
+  });
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -525,20 +542,6 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_activate(
   RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
               "Activating MuJoCo hardware interface and starting Simulate threads...");
 
-    // When the interface is activated, we start the physics engine.
-    physics_thread_ = std::thread([this]() {
-      // Load the simulation and do an initial forward pass
-      RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Starting the mujoco physics thread...");
-      sim_->Load(mj_model_, mj_data_, model_path_.c_str());
-      // lock the sim mutex
-      {
-        const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
-        mj_forward(mj_model_, mj_data_);
-      }
-      // Blocks until terminated
-      PhysicsLoop(*sim_);
-    });
-
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -548,6 +551,8 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_deactivate(
   RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
               "Deactivating MuJoCo hardware interface and shutting down Simulate...");
 
+  // TODO: Should we shut things down here or in the destructor?
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -555,6 +560,20 @@ hardware_interface::return_type MujocoSystemInterface::read(
   const rclcpp::Time & /*time*/,
   const rclcpp::Duration & /*period*/)
 {
+  std::lock_guard<std::recursive_mutex> lock(*sim_mutex_);
+
+  // Pull joint data from actuators
+  for (size_t i = 0; i < n_joints_; ++i) {
+    int j_id = muj_joint_id_[i];
+
+    int qposadr = mj_model_->jnt_qposadr[j_id];
+    hw_positions_[i] = mj_data_->qpos[qposadr];
+
+    int qveladr = mj_model_->jnt_dofadr[j_id];
+    hw_velocities_[i] = mj_data_->qvel[qveladr];
+
+    hw_efforts_[i] = mj_data_->actuator_force[muj_actuator_id_[i]];
+  }
   return hardware_interface::return_type::OK;
 }
 
@@ -562,6 +581,14 @@ hardware_interface::return_type MujocoSystemInterface::write(
   const rclcpp::Time & /*time*/,
   const rclcpp::Duration & /*period*/)
 {
+  std::lock_guard<std::recursive_mutex> lock(*sim_mutex_);
+
+  // Set commads for actuators
+  for (size_t i = 0; i < n_joints_; ++i) {
+    int a_id = muj_actuator_id_[i];
+    mj_data_->ctrl[a_id] = hw_commands_[i];
+  }
+
   return hardware_interface::return_type::OK;
 }
 
