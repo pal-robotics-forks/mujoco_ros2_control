@@ -874,7 +874,7 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
     else
     {
       RCLCPP_ERROR_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                          "Invalid sensor type passed to the mujoco hardware interface: " << mujoco_type);
+                          "Invalid mujoco_type passed to the mujoco hardware interface: " << mujoco_type);
     }
   }
 }
