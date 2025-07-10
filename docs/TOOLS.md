@@ -16,7 +16,7 @@ ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py
 ```
 
 By default, the tool will pull a URDF from the `/robot_description` topic.
-However, this is configurable at exection time.
+However, this is configurable at execution time.
 A complete list of options is available from the argument parser:
 
 ```bash
@@ -62,7 +62,7 @@ ros2 launch chonkur_description view_robot.launch.py
 ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py -m $(ros2 pkg prefix chonkur_mujoco_config --share)/description/mujoco_inputs.xml -o output/
 ```
 
-Like above, this will dump all necesarry data to the `output` directory, which can then be copied or modified as needed.
+Like above, this will dump all necessary data to the `output` directory, which can then be copied or modified as needed.
 
 To view the results of the conversion, you can use Mujoco's `simulate` tool.
 This will bringup the standard Mujoco user panel with the converted Chonkur:
