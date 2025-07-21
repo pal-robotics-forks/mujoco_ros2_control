@@ -1,5 +1,21 @@
+---
+workflow:
+  rules:
+    # Always run on tagged commits
+    - if: $CI_COMMIT_TAG
+      when: always
+    # Run for merge requests
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+    # Run for commits to protected/standard development branches
+    - if: '$CI_COMMIT_BRANCH == "humble" || $CI_COMMIT_BRANCH == "jazzy" || $CI_COMMIT_BRANCH =~ /.*-devel$/'
+      when: always
+    - when: never
+
 stages:
   - lint
+  - build
+  - test
 
 pre-commit-check:
   stage: lint
@@ -15,3 +31,39 @@ pre-commit-check:
     - if: '$CI_COMMIT_BRANCH == "humble" || $CI_COMMIT_BRANCH == "jazzy" || $CI_COMMIT_BRANCH =~ /.*-devel$/'
       when: always
     - when: never
+
+build:
+  stage: build
+  image:
+    name: js-er-code.jsc.nasa.gov:5005/ci_build/docker_with_nasa_certs:latest
+  before_script:
+    - docker info
+    - docker login -u gitlab-ci-token -p ${CI_JOB_TOKEN} ${CI_REGISTRY}
+    - echo -e "machine js-er-code.jsc.nasa.gov\nlogin gitlab-ci-token\npassword ${CI_JOB_TOKEN}" > ~/.netrc
+  script:
+    - DOCKER_BUILDKIT=1 docker build
+        -t "${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG}"
+        --load
+        --target mujoco_ros
+        --file docker/Dockerfile
+        .
+    - docker push ${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG}
+  tags:
+    - dind
+
+test:
+  stage: test
+  image:
+    name: js-er-code.jsc.nasa.gov:5005/ci_build/docker_with_nasa_certs:latest
+  script:
+    - |
+      docker run --rm \
+      ${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG} \
+      bash -c "
+        colcon test &&
+        colcon test-result --verbose
+      "
+  after_script:
+    - docker image rm --force ${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_SLUG} || true
+  tags:
+    - dind

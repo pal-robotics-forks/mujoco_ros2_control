@@ -166,3 +166,34 @@ Type: sensor_msgs/msg/Image
 $ ros2 topic info /wrist_mounted_camera_color/depth
 Type: sensor_msgs/msg/Image
 ```
+
+## Docker Development Workflow
+
+This project includes a [Dockerfile](./.docker/Dockerfile) for development and testing in an isolated environment.
+Use the provided scripts to build and run the images.
+
+**Note**: you may need to give docker access to xhost with `xhost +local:docker` to ensure the container has access to the host UI.
+
+First, build a new image with default settings:
+
+```bash
+./docker/build.sh
+```
+
+The image can be started in a new shell with:
+
+```bash
+./docker/run.sh
+```
+
+This will launch you into a container with the source code mounted in a colcon workspace.
+From there the source can be modified, built, tested, or otherwise used as normal.
+For example, launch the included test scene with,
+
+```bash
+# Evaluate using the included mujoco simulate application
+${MUJOCO_DIR}/bin/simulate ${ROS_WS}/src/mujoco_ros2_simulation/test/resources/scene.xml
+
+# Or launch the test ROS control interface
+ros2 launch mujoco_ros2_simulation test_robot.launch.py
+```

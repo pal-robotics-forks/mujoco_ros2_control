@@ -1,5 +1,5 @@
-<mujoco model="robotiq_scene">
-  <include file="mujoco_description_formatted.xml"/>
+<mujoco model="scene">
+  <include file="test_robot.xml"/>
 
   <statistic center="0.4 0 0.4" extent="1"/>
 

@@ -39,13 +39,24 @@ def generate_launch_description():
 
     robot_description = {"robot_description": ParameterValue(value=robot_description_content, value_type=str)}
 
+    robot_state_publisher_node = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        output="both",
+        parameters=[
+            robot_description,
+            {"use_sim_time": True},
+        ],
+    )
+
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
-        parameters=[
-            robot_description,
-        ],
         output="both",
+        parameters=[
+            {"use_sim_time": True},
+        ],
+        remappings=[("~/robot_description", "/robot_description")],
     )
 
-    return LaunchDescription([control_node])
+    return LaunchDescription([robot_state_publisher_node, control_node])

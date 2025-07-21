@@ -101,7 +101,7 @@
     <child link="camera_color_frame"/>
     <origin xyz="-0.05 0 0" rpy="0 0 0"/>
   </joint>
-\
+
   <!-- The camera looks backwards along the axis of the forearm, following the standard ROS image conventions -->
   <!-- https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/Image.msg#L7 -->
   <link name="camera_color_optical_frame"/>
@@ -122,7 +122,7 @@
   <ros2_control name="MujocoSystem" type="system">
     <hardware>
       <plugin>mujoco_ros2_simulation/MujocoSystemInterface</plugin>
-      <param name="mujoco_model">$(find mujoco_ros2_simulation)/resources/test_robot.xml</param>
+      <param name="mujoco_model">$(find mujoco_ros2_simulation)/resources/scene.xml</param>
     </hardware>
     <joint name="joint1">
       <command_interface name="position"/>
