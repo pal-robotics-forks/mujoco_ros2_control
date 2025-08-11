@@ -575,9 +575,8 @@ def parse_inputs_xml(filename=None):
     </mujoco_inputs>
     """
 
-    mujoco_inputs = dict()
     if not filename:
-        return mujoco_inputs
+        return None, None
 
     print(f"Parsing mujoco elements from: {filename}")
 
