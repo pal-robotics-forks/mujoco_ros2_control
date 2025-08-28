@@ -744,7 +744,7 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
   {
     joint_state.position = mj_data_->qpos[joint_state.mj_pos_adr];
     joint_state.velocity = mj_data_->qvel[joint_state.mj_vel_adr];
-    joint_state.effort = mj_data_->actuator_force[joint_state.mj_vel_adr];
+    joint_state.effort = mj_data_->qfrc_actuator[joint_state.mj_vel_adr];
   }
 
   // IMU Sensor data
@@ -805,22 +805,14 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
     if (joint_state.is_position_control_enabled)
     {
       mj_data_->ctrl[joint_state.mj_actuator_id] = joint_state.position_command;
-      mj_data_->qfrc_applied[joint_state.mj_vel_adr] = 0.0;
     }
     else if (joint_state.is_velocity_control_enabled)
     {
       mj_data_->ctrl[joint_state.mj_actuator_id] = joint_state.velocity_command;
-      mj_data_->qfrc_applied[joint_state.mj_vel_adr] = 0.0;
     }
     else if (joint_state.is_effort_control_enabled)
     {
-      // TODO: How can we clear the ctrl?
-      mj_data_->qfrc_applied[joint_state.mj_vel_adr] = joint_state.effort_command;
-    }
-    else
-    {
-      // Otherwise no control is enabled so we just tell the actuator to hold its current pose
-      mj_data_->ctrl[joint_state.mj_actuator_id] = joint_state.position;
+      mj_data_->ctrl[joint_state.mj_actuator_id] = joint_state.effort_command;
     }
   }
 
