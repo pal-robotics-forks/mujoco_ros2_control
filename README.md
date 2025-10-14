@@ -10,7 +10,8 @@ Parts of this library are also based on the MoveIt [mujoco_ros2_control](https:/
 
 ## Installation
 
-This interface has only been tested against ROS 2 humble and MuJoCo `3.3.4`.
+This interface has only been tested against ROS 2 jazzy and MuJoCo `3.3.4`.
+It should also be compatible with kilted and rolling, but we do not actively maintain those.
 We assume all required ROS dependencies have been installed either manually or with `rosdep`.
 
 A local install of MuJoCo is required to build the application, this package will not handle it for you.
@@ -70,6 +71,26 @@ Just specify the plugin and point to a valid MJCF on launch:
     </hardware>
   ...
 ```
+
+Due to compatibility issues, we use a [slightly modified ROS 2 control node](./src/mujoco_ros2_control_node.cpp).
+It is the same executable and parameters as the upstream, but requires updating the launchfile:
+
+```python
+    control_node = Node(
+        # Specify the control node from this package!
+        package="mujoco_ros2_simulation",
+        executable="ros2_control_node",
+        output="both",
+        parameters=[
+            {"use_sim_time": True},
+            controller_parameters,
+        ],
+    )
+```
+
+> **_NOTE_**: We can remove the the ROS 2 control node after the next ros2_control upstream release,
+as the simulation requires [this PR](https://github.com/ros-controls/ros2_control/pull/2654) to run.
+The hardware interface _should_ then be compatible with `humble`, `jazzy`, and `kilted`.
 
 ### Joints
 
@@ -257,34 +278,41 @@ The lidar sensor is then configurable through ROS 2 control xacro with:
 
 ## Docker Development Workflow
 
-This project includes a [Dockerfile](./.docker/Dockerfile) for development and testing in an isolated environment.
-Use the provided scripts to build and run the images.
+This project includes a [compose](./docker-compose.yml) and [Dockerfile](./.docker/Dockerfile) for development and testing in an isolated environment.
 
 **Note**: you may need to give docker access to xhost with `xhost +local:docker` to ensure the container has access to the host UI.
 
-First, build a new image with default settings:
+For users on arm64 machines, be sure to specify the `CPU_ARCH` variable in your environment when building.
 
 ```bash
-./docker/build.sh
+docker compose build
 ```
 
-The image can be started in a new shell with:
+The service can be started with:
 
 ```bash
-./docker/run.sh
+# Start the service in one shell (or start detached)
+docker compose up
+
+# Connect to it in another
+docker compose exec dev bash
 ```
 
-This will launch you into a container with the source code mounted in a colcon workspace.
+This will launch a container with the source code mounted in a colcon workspace.
 From there the source can be modified, built, tested, or otherwise used as normal.
 For example, launch the included test scene with,
 
 ```bash
 # Evaluate using the included mujoco simulate application
-${MUJOCO_DIR}/bin/simulate ${ROS_WS}/src/mujoco_ros2_simulation/test/resources/scene.xml
+${MUJOCO_DIR}/bin/simulate ${ROS_WS}/src/mujoco_ros2_simulation/test/test_resources/scene.xml
 
 # Or launch the test ROS control interface
 ros2 launch mujoco_ros2_simulation test_robot.launch.py
 ```
+
+> **_NOTE:_** Rendering contexts in containers can be tricky.
+Users may need to tweak the compose file to support their specific host OS or GPUs.
+For more information refer to the comments in the compose file.
 
 ### Test Robot System
 

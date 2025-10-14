@@ -60,14 +60,13 @@ def generate_launch_description():
     )
 
     control_node = Node(
-        package="controller_manager",
+        package="mujoco_ros2_simulation",
         executable="ros2_control_node",
         output="both",
         parameters=[
             {"use_sim_time": True},
             controller_parameters,
         ],
-        remappings=[("~/robot_description", "/robot_description")],
     )
 
     spawn_joint_state_broadcaster = Node(
