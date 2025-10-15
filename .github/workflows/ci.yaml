@@ -85,4 +85,4 @@ jobs:
           pixi run setup-colcon
           pixi run build
           pixi run test
-          pixi run -e test-result
+          pixi run test-result
