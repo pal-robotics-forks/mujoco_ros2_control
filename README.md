@@ -14,8 +14,8 @@ This interface has only been tested against ROS 2 jazzy and MuJoCo `3.3.4`.
 It should also be compatible with kilted and rolling, but we do not actively maintain those.
 We assume all required ROS dependencies have been installed either manually or with `rosdep`.
 
-For configuring MuJoCo, the included [CMakeLists.txt](./CMakeLists.txt) will first attempt to use the mujoco_vendor package if it is installed in your workspace.
-If mujoco_vendor is not found, a local install of MuJoCo can be used to build the application by setting the following environment variables,
+For configuring MuJoCo, the included [CMakeLists.txt](./CMakeLists.txt) will first attempt to use the  [mujoco_vendor](https://github.com/pal-robotics/mujoco_vendor) package if it is installed in your workspace.
+If [mujoco_vendor] is not found, a local install of MuJoCo can be used to build the application by setting the following environment variables,
 
 ```bash
 # The tested version
