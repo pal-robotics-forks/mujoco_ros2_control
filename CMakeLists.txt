@@ -17,65 +17,18 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(Threads REQUIRED)
 
+# Import MuJoCo via vendor package (already installed)
+find_package(mujoco REQUIRED)
+set(MUJOCO_LIB mujoco::mujoco)
+get_target_property(MUJOCO_INCLUDE_DIR mujoco::mujoco INTERFACE_INCLUDE_DIRECTORIES)
+set(MUJOCO_SIMULATE_DIR ${MUJOCO_INCLUDE_DIR}/../simulate)
+
+message(STATUS "Using MuJoCo from vendor package")
+message(STATUS "  MUJOCO_INCLUDE_DIR: ${MUJOCO_INCLUDE_DIR}")
+message(STATUS "  MUJOCO_SIMULATE_DIR: ${MUJOCO_SIMULATE_DIR}")
+
+
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-# Attempt to find an install of mujoco, either the library itself, from the environment, or
-# as a last resort download the required tar file manually and unzip it into the workspace.
-find_package(mujoco QUIET)
-if(mujoco_FOUND)
-  message(STATUS "Mujoco build from source has been found")
-  set(MUJOCO_LIB mujoco::mujoco)
-  set(MUJOCO_INCLUDE_DIR ${MUJOCO_INCLUDE_DIR})
-  set(MUJOCO_SIMULATE_DIR ${MUJOCO_INCLUDE_DIR}/../simulate)
-elseif(DEFINED ENV{MUJOCO_INSTALL_DIR})
-  message(STATUS "Mujoco build from source has not been found. Attempting to find the binary in $ENV{MUJOCO_INSTALL_DIR} instead.")
-  set(MUJOCO_DIR $ENV{MUJOCO_INSTALL_DIR})
-  find_library(MUJOCO_LIB mujoco HINTS $ENV{MUJOCO_DIR}/lib)
-  if(NOT MUJOCO_LIB)
-    message(FATAL_ERROR "Failed to find binary in $ENV{MUJOCO_DIR}")
-  endif()
-  set(MUJOCO_INCLUDE_DIR $ENV{MUJOCO_DIR}/include)
-  set(MUJOCO_SIMULATE_DIR $ENV{MUJOCO_DIR}/simulate)
-else()
-  include(FetchContent)
-
-  # Detect architecture
-  set(MUJOCO_VERSION "3.3.4")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    set(CPU_ARCH "x86_64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    set(CPU_ARCH "aarch64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-
-  message(STATUS "No MuJoCo installation found. Downloading MuJoCo ${MUJOCO_VERSION} for ${CPU_ARCH}.")
-
-  # Download the archive and put it next to the source directory
-  set(MUJOCO_DOWNLOAD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/mujoco)
-  set(MUJOCO_EXTRACT_DIR ${MUJOCO_DOWNLOAD_DIR}/mujoco-${MUJOCO_VERSION})
-  set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
-  FetchContent_Declare(
-    mujoco_download
-    URL https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-${CPU_ARCH}.tar.gz
-    SOURCE_DIR ${MUJOCO_EXTRACT_DIR}
-    DOWNLOAD_EXTRACT_TIMESTAMP True
-  )
-  FetchContent_MakeAvailable(mujoco_download)
-
-  set(MUJOCO_DIR ${MUJOCO_EXTRACT_DIR})
-  message(STATUS "MuJoCo downloaded to: ${MUJOCO_DIR}")
-
-  # Find the library in the downloaded location
-  find_library(MUJOCO_LIB mujoco HINTS ${MUJOCO_DIR}/lib NO_DEFAULT_PATH)
-  if(NOT MUJOCO_LIB)
-    message(FATAL_ERROR "Failed to find MuJoCo library in ${MUJOCO_DIR}/lib")
-  endif()
-
-  set(MUJOCO_INCLUDE_DIR ${MUJOCO_DIR}/include)
-  set(MUJOCO_SIMULATE_DIR ${MUJOCO_DIR}/simulate)
-  message(STATUS "MuJoCo library found: ${MUJOCO_LIB}")
-endif()
 
 # Fetch lodepng dependency.
 if(NOT TARGET lodepng)
