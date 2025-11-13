@@ -1126,7 +1126,7 @@ void MujocoSystemInterface::register_joints(const hardware_interface::HardwareIn
             continue;
           }
         }
-        if(last_joint_state.actuator_type == ActuatorType::POSITION || last_joint_state.actuator_type == ActuatorType::CUSTOM)
+        else if(last_joint_state.actuator_type == ActuatorType::POSITION || last_joint_state.actuator_type == ActuatorType::CUSTOM)
         {
           last_joint_state.is_position_control_enabled = true;
           last_joint_state.position_command = last_joint_state.position;
@@ -1150,7 +1150,7 @@ void MujocoSystemInterface::register_joints(const hardware_interface::HardwareIn
             continue;
           }
         }
-        if(last_joint_state.actuator_type == ActuatorType::VELOCITY || last_joint_state.actuator_type == ActuatorType::CUSTOM )
+        else if(last_joint_state.actuator_type == ActuatorType::VELOCITY || last_joint_state.actuator_type == ActuatorType::CUSTOM )
         {
           last_joint_state.is_velocity_control_enabled = true;
           last_joint_state.velocity_command = last_joint_state.velocity;
