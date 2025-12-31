@@ -14,7 +14,7 @@ FROM ros:${ROS_DISTRO} AS mujoco_ros
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Defaults for the MuJoCo install, CPU_ARCH may be set to aarch64 for arm cpus
-ARG MUJOCO_VERSION=3.3.4
+ARG MUJOCO_VERSION=3.4.0
 ARG CPU_ARCH=x86_64
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -61,11 +61,11 @@ RUN tar -xzf "mujoco-${MUJOCO_VERSION}-linux-${CPU_ARCH}.tar.gz" -C $(dirname "$
 
 # Setup a ROS workspace
 ENV ROS_WS="/opt/mujoco/ws"
-RUN mkdir -p ${ROS_WS}/src/mujoco_ros2_simulation
+RUN mkdir -p ${ROS_WS}/src/mujoco_ros2_control
 WORKDIR ${ROS_WS}
 
 # Copy package manifests for installing rosdeps
-COPY --from=package-manifests /src/ ${ROS_WS}/src/mujoco_ros2_simulation
+COPY --from=package-manifests /src/ ${ROS_WS}/src/mujoco_ros2_control
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -75,7 +75,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rosdep install -iry --from-paths src/
 
 # Copy remaining source
-COPY . ${ROS_WS}/src/mujoco_ros2_simulation/
+COPY . ${ROS_WS}/src/mujoco_ros2_control/
 
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
     && colcon build \

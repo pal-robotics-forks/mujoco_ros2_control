@@ -1,16 +1,16 @@
-# MuJoCo ROS 2 Simulation
+# MuJoCo ros2_control Simulation
 
-This package contains a ROS 2 control system interface for the [MuJoCo Simulator](https://mujoco.readthedocs.io/en/3.3.4/overview.html).
+This package contains a ros2_control system interface for the [MuJoCo Simulator](https://mujoco.readthedocs.io/en/3.4.0/overview.html).
 It was originally written for simulating robot hardware in NASA Johnson's [iMETRO facility](https://ntrs.nasa.gov/citations/20230015485).
 
-The system interface wraps MuJoCo's [Simulate App](https://github.com/google-deepmind/mujoco/tree/3.3.4/simulate) to provide included functionality.
+The system interface wraps MuJoCo's [Simulate App](https://github.com/google-deepmind/mujoco/tree/3.4.0/simulate) to provide included functionality.
 Because the app is not bundled as a library, we compile it directly from a local install of MuJoCo.
 
 Parts of this library are also based on the MoveIt [mujoco_ros2_control](https://github.com/moveit/mujoco_ros2_control) package.
 
 ## Installation
 
-This interface has only been tested against ROS 2 jazzy and MuJoCo `3.3.4`.
+This interface has only been tested against ROS 2 jazzy and MuJoCo `3.4.0`.
 It should also be compatible with kilted and rolling, but we do not actively maintain those.
 We assume all required ROS dependencies have been installed either manually or with `rosdep`.
 
@@ -19,10 +19,10 @@ If it is not found, a local install of MuJoCo can be used to build the applicati
 
 ```bash
 # The tested version
-MUJOCO_VERSION=3.3.4
+MUJOCO_VERSION=3.4.0
 
 # Wherever it was installed and extracted on your machine
-MUJOCO_INSTALL_DIR=/opt/mujoco/mujoco-3.3.4
+MUJOCO_INSTALL_DIR=/opt/mujoco/mujoco-3.4.0
 ```
 If neither is available, the script will automatically download and install the MuJoCo tarfile.
 As long as users have a stable network connection, this process should complete without issues.
@@ -48,8 +48,16 @@ Just specify the plugin and point to a valid MJCF on launch:
 ```xml
   <ros2_control name="MujocoSystem" type="system">
     <hardware>
-      <plugin>mujoco_ros2_simulation/MujocoSystemInterface</plugin>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
       <param name="mujoco_model">$(find my_description)/description/scene.xml</param>
+
+      <!--
+       Optional parameter to load the PIDs that can be used with the actuators loaded with the MuJoCo model.
+       The velocity actuator supports position mode with the PID gains, and the rest of the actuation models
+       support both position and velocity mode provided the corresponding PID gains. The gains should be in ROS
+       parameters format to be loaded by the control_toolbox::PidROS class.
+        -->
+      <param name="pids_config_file">$(find my_description)/config/pids.yaml</param>
 
       <!--
        Optional parameter to override the speed scaling parameters from the Simulate App window
@@ -58,6 +66,15 @@ Just specify the plugin and point to a valid MJCF on launch:
        a value <0, then the simulation will run using the slowdown requested from the App.
       -->
       <param name="sim_speed_factor">5.0</param>
+
+      <!--
+        Optional parameter to use the keyframe from a provided file as the starting configuration. This is mutually exclusive with
+        the initial_value that can be used for state interfaces. This is intended to provide an alternative method to load an entire
+        mujoco model state from a configuration that was saved by clicking 'Copy state' in the simulate window, and pasted into a
+        config file. Expected use cases are to work on a specific part of an application that involves the environment being in a
+        very specific starting configuration. If this parameter is an empty string, it will be ignored.
+      -->
+      <param name="override_start_position_file">$(find my_description)/config/start_positions.xml</param>
 
       <!--
         Optional parameter to update the simulated camera's color and depth image publish rates. If no
@@ -71,6 +88,12 @@ Just specify the plugin and point to a valid MJCF on launch:
         All lidar sensors in the simulation will be configured to publish these scan messages at the same rate.
       -->
       <param name="lidar_publish_rate">10.0</param>
+
+      <!--
+        The parameter headless can be used to choose whether to launch the MuJoCo simulator in headless mode or not.
+        By default, it is set to false
+      -->
+      <param name="headless">false</param>
     </hardware>
   ...
 ```
@@ -81,7 +104,7 @@ It is the same executable and parameters as the upstream, but requires updating 
 ```python
     control_node = Node(
         # Specify the control node from this package!
-        package="mujoco_ros2_simulation",
+        package="mujoco_ros2_control",
         executable="ros2_control_node",
         output="both",
         parameters=[
@@ -91,16 +114,24 @@ It is the same executable and parameters as the upstream, but requires updating 
     )
 ```
 
-> **_NOTE_**: We can remove the the ROS 2 control node after the next ros2_control upstream release,
-as the simulation requires [this PR](https://github.com/ros-controls/ros2_control/pull/2654) to run.
-The hardware interface _should_ then be compatible with `humble`, `jazzy`, and `kilted`.
+> [!NOTE]
+> We can remove the the ROS 2 control node after the next ros2_control upstream release,
+> as the simulation requires [this PR](https://github.com/ros-controls/ros2_control/pull/2654) to run.
+> The hardware interface _should_ then be compatible with `humble`, `jazzy`, and `kilted`.
 
 ### Joints
 
 Joints in the ros2_control interface are mapped to actuators defined in the MJCF.
-For now, we rely on Mujoco's PD level `ctrl` input for all actuator control.
+The system supports different joint control modes based on the actuator type and available command interfaces.
+
+We rely on MuJoCo's PD-level ctrl input for direct position, velocity, or effort control.
+For velocity, motor, or custom actuators, a position or velocity PID is created if specified using ROS parameters to enable accurate control.
+Incompatible actuator-interface combinations trigger an error.
+
 Refer to Mujoco's [actuation model](https://mujoco.readthedocs.io/en/stable/computation/index.html#geactuation) for more information.
-Of note, only one type of actuator per-joint can be controllable at a time, and the type CANNOT be switched during runtime (ie, switching from position to effort control is not supported).
+
+Of note, only one type of MuJoCo actuator per-joint can be controllable at a time, and the type CANNOT be switched during runtime (i.e., switching from position to motor actuator is not supported).
+However, the active command interface can be switched dynamically, allowing control to shift between position, velocity, or effort as supported by the actuator type.
 Users are required to manually adjust actuator types and command interfaces to ensure that they are compatible.
 
 For example a position controlled joint on the mujoco
@@ -124,6 +155,48 @@ Could map to the following hardware interface:
     <state_interface name="effort"/>
   </joint>
 ```
+
+**Supported modes between MuJoCo actuators and ros2_control command interfaces:**
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="border:none;"></th>
+      <th style="border:none;"></th>
+      <th colspan="3" style="text-align:center;">MuJoCo Actuators</th>
+    </tr>
+    <tr>
+      <th style="border:none;"></th>
+      <th>position</th>
+      <th>velocity</th>
+      <th>motor, general, etc </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th rowspan="3" style="text-align:center;">ros2 control<br>command<br>interfaces</th>
+      <th>position</th>
+      <td style="background:#c6efce;">Native support</td>
+      <td style="background:#ffeb9c;">Supported using PIDs</td>
+      <td style="background:#ffeb9c;">Supported using PIDs</td>
+    </tr>
+    <tr>
+      <th>velocity</th>
+      <td style="background:#ffc7ce;">Not supported</td>
+      <td style="background:#c6efce;">Native support</td>
+      <td style="background:#ffeb9c;">Supported using PIDs</td>
+    </tr>
+    <tr>
+      <th>effort</th>
+      <td style="background:#ffc7ce;">Not supported</td>
+      <td style="background:#ffc7ce;">Not supported</td>
+      <td style="background:#c6efce;">Native support</td>
+    </tr>
+  </tbody>
+</table>
+
+> [!NOTE]
+> The `torque` and `force` command/state interfaces are semantically equivalent to `effort`, and map to the same underlying data in the sim.
 
 Switching actuator/control types on the fly is an [open issue](#13).
 
@@ -151,6 +224,10 @@ In the corresponding ros2_control xacro, this becomes a single sensor:
     <param name="mujoco_type">fts</param>
     <!-- There is no requirement for the mujoco_sensor_name to match the ros2_control sensor name -->
     <param name="mujoco_sensor_name">fts_sensor</param>
+    <!-- Default value of force_mjcf_suffix is '_force' -->
+    <param name="force_mjcf_suffix">_force</param>
+    <!-- Default value of torque_mjcf_suffix is '_torque' -->
+    <param name="torque_mjcf_suffix">_torque</param>
     <state_interface name="force.x"/>
     <state_interface name="force.y"/>
     <state_interface name="force.z"/>
@@ -177,6 +254,12 @@ Which then map to the corresponding ros2_control sensor:
     <param name="mujoco_type">imu</param>
     <!-- There is no requirement for the mujoco_sensor_name to match the ros2_control sensor name -->
     <param name="mujoco_sensor_name">imu_sensor</param>
+    <!-- Default value of orientation_mjcf_suffix is '_quat' -->
+    <param name="orientation_mjcf_suffix">_quat</param>
+    <!-- Default value of angular_velocity_mjcf_suffix is '_gyro' -->
+    <param name="angular_velocity_mjcf_suffix">_gyro</param>
+    <!-- Default value of linear_acceleration_mjcf_suffix is '_accel' -->
+    <param name="linear_acceleration_mjcf_suffix">_accel</param>
     <state_interface name="orientation.x"/>
     <state_interface name="orientation.y"/>
     <state_interface name="orientation.z"/>
@@ -279,68 +362,7 @@ The lidar sensor is then configurable through ROS 2 control xacro with:
   </ros2_control>
 ```
 
-## Docker Development Workflow
-
-This project includes a [compose](./docker-compose.yml) and [Dockerfile](./.docker/Dockerfile) for development and testing in an isolated environment.
-
-**Note**: you may need to give docker access to xhost with `xhost +local:docker` to ensure the container has access to the host UI.
-
-For users on arm64 machines, be sure to specify the `CPU_ARCH` variable in your environment when building.
-
-```bash
-docker compose build
-```
-
-The service can be started with:
-
-```bash
-# Start the service in one shell (or start detached)
-docker compose up
-
-# Connect to it in another
-docker compose exec dev bash
-```
-
-This will launch a container with the source code mounted in a colcon workspace.
-From there the source can be modified, built, tested, or otherwise used as normal.
-For example, launch the included test scene with,
-
-```bash
-# Evaluate using the included mujoco simulate application
-${MUJOCO_DIR}/bin/simulate ${ROS_WS}/src/mujoco_ros2_simulation/test/test_resources/scene.xml
-
-# Or launch the test ROS control interface
-ros2 launch mujoco_ros2_simulation test_robot.launch.py
-```
-
-> **_NOTE:_** Rendering contexts in containers can be tricky.
-Users may need to tweak the compose file to support their specific host OS or GPUs.
-For more information refer to the comments in the compose file.
-
-## Pixi Development Workflow
-
-A [pixi](https://pixi.sh/latest/installation/) and [robostack](https://robostack.github.io) workflow is also provided.
-The environment is currently only compatible with Jazzy.
-
-To run ensure pixi is installed.
-Then,
-
-```bash
-# Setup the build environment
-pixi run setup-colcon
-
-# Build the package
-pixi run build
-
-# Run tests
-pixi run test
-
-# Launch an interactive shell and source the install
-pixi shell
-source install/setup.bash
-```
-
-### Test Robot System
+## Test Robot System
 
 While examples are limited, we maintain a functional example 2-dof robot system in the [test examples](./test/test_resources/test_robot.urdf) space.
 We generally recommend looking there for examples and recommended workflows.
@@ -349,10 +371,13 @@ For now, built the drivers with testing enabled, then the test robot system can 
 
 ```bash
 # Brings up the hardware drivers and mujoco interface, along with a single position controller
-ros2 launch mujoco_ros2_simulation test_robot.launch.py
+ros2 launch mujoco_ros2_control test_robot.launch.py
+
+# Or optionally include the PID controller as mentioned above
+ros2 launch mujoco_ros2_control test_robot.launch.py use_pid:=true
 
 # Launch an rviz2 window with the provided configuration
-rviz2 -d $(ros2 pkg prefix --share mujoco_ros2_simulation)/config/test_robot.rviz
+rviz2 -d $(ros2 pkg prefix --share mujoco_ros2_control)/config/test_robot.rviz
 ```
 
 From there, command joints to move with,
@@ -360,3 +385,12 @@ From there, command joints to move with,
 ```bash
 ros2 topic pub /position_controller/commands std_msgs/msg/Float64MultiArray "data: [-0.25, 0.75]" --once
 ```
+
+> [!TIP]
+> UI panels can be toggled with `Tab` or `Shift+Tab`.
+> All standard MuJoCo keyboard shortcuts are available.
+> To see a short list, press `F1`.
+
+## Development
+
+More information is provided in the [developers guide](./docs/DEVELOPMENT.md) document.

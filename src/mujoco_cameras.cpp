@@ -17,14 +17,14 @@
  * under the License.
  */
 
-#include "mujoco_ros2_simulation/mujoco_cameras.hpp"
-#include "mujoco_ros2_simulation/utils.hpp"
+#include "mujoco_ros2_control/mujoco_cameras.hpp"
+#include "mujoco_ros2_control/utils.hpp"
 
 #include "sensor_msgs/image_encodings.hpp"
 
 using namespace std::chrono_literals;
 
-namespace mujoco_ros2_simulation
+namespace mujoco_ros2_control
 {
 
 MujocoCameras::MujocoCameras(rclcpp::Node::SharedPtr& node, std::recursive_mutex* sim_mutex, mjData* mujoco_data,
@@ -131,6 +131,12 @@ void MujocoCameras::register_cameras(const hardware_interface::HardwareInfo& har
 void MujocoCameras::init()
 {
   // Start the rendering thread process
+  if (!glfwInit())
+  {
+    RCLCPP_WARN(node_->get_logger(), "Failed to initialize GLFW. Disabling camera publishing.");
+    publish_images_ = false;
+    return;
+  }
   publish_images_ = true;
   rendering_thread_ = std::thread(&MujocoCameras::update_loop, this);
 }
@@ -150,7 +156,6 @@ void MujocoCameras::close()
 void MujocoCameras::update_loop()
 {
   // We create an offscreen context specific to this process for managing camera rendering.
-  glfwInit();
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
   GLFWwindow* window = glfwCreateWindow(1, 1, "", NULL, NULL);
   glfwMakeContextCurrent(window);
@@ -164,14 +169,23 @@ void MujocoCameras::update_loop()
   // Turn rangefinder rendering off so we don't get rays in camera images
   mjv_opt_.flags[mjtVisFlag::mjVIS_RANGEFINDER] = 0;
 
+  // Initialize data for camera rendering
+  mj_camera_data_ = mj_makeData(mj_model_);
+  RCLCPP_INFO(node_->get_logger(), "Starting the camera rendering loop, publishing at %f Hz", camera_publish_rate_);
+
   // create scene and context
   mjv_makeScene(mj_model_, &mjv_scn_, 2000);
   mjr_makeContext(mj_model_, &mjr_con_, mjFONTSCALE_150);
 
-  // Initialize data for camera rendering
-  mj_camera_data_ = mj_makeData(mj_model_);
-  RCLCPP_INFO_STREAM(node_->get_logger(),
-                     "Starting the camera rendering loop, publishing at " << camera_publish_rate_ << " Hz");
+  // Ensure the context will support the largest cameras
+  int max_width = 1, max_height = 1;
+  for (const auto& cam : cameras_)
+  {
+    max_width = std::max(max_width, static_cast<int>(cam.width));
+    max_height = std::max(max_height, static_cast<int>(cam.height));
+  }
+  mjr_resizeOffscreen(max_width, max_height, &mjr_con_);
+  RCLCPP_INFO(node_->get_logger(), "Resized offscreen buffer to %d x %d", max_width, max_height);
 
   // TODO: Support per-camera publish rates?
   rclcpp::Rate rate(camera_publish_rate_);
@@ -211,7 +225,7 @@ void MujocoCameras::update()
   for (auto& camera : cameras_)
   {
     // Fix non-linear projections in the depth image and flip the data.
-    // https://github.com/google-deepmind/mujoco/blob/3.3.4/python/mujoco/renderer.py#L190
+    // https://github.com/google-deepmind/mujoco/blob/3.4.0/python/mujoco/renderer.py#L190
     for (uint32_t h = 0; h < camera.height; h++)
     {
       for (uint32_t w = 0; w < camera.width; w++)
@@ -250,4 +264,4 @@ void MujocoCameras::update()
   }
 }
 
-}  // namespace mujoco_ros2_simulation
+}  // namespace mujoco_ros2_control

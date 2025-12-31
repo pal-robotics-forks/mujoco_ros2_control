@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>mujoco_ros2_simulation</name>
+  <name>mujoco_ros2_control</name>
   <version>0.0.0</version>
   <description>ros2_control wrapper for the Mujoco Simulate application</description>
   <maintainer email="nathan.b.dunkelberger@nasa.gov">Nathan Dunkelberger</maintainer>
@@ -10,6 +10,7 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>mujoco_vendor</depend>
   <depend>controller_manager</depend>
   <depend>hardware_interface</depend>
   <depend>libglfw3-dev</depend>
@@ -17,7 +18,7 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
-  <depend>mujoco_vendor</depend>
+  <depend>control_toolbox</depend>
 
   <test_depend>joint_state_broadcaster</test_depend>
   <test_depend>position_controllers</test_depend>
@@ -25,6 +26,10 @@
   <test_depend>urdfdom</test_depend>
   <test_depend>urdfdom_py</test_depend>
   <test_depend>xacro</test_depend>
+
+  <exec_depend>python3-mujoco-pip</exec_depend>
+  <exec_depend>python3-trimesh-pip</exec_depend>
+  <exec_depend>python3-obj2mjcf-pip</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

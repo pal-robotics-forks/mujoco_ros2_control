@@ -1,6 +1,5 @@
 # Mujoco To ROS Tools
 
-> **NOTE**: TODO: This tool is broken on jazzy and beyond, stick with the `humble-devel` branch until https://github.com/NASA-JSC-Robotics/mujoco_ros2_simulation/issues/22 is resolve.
 
 > **WARNING**: These tools are highly experimental.
 Expect things to be broken.
@@ -15,7 +14,7 @@ They are intended to be used for assistance and getting started, but do not expe
 The current tool that is available is `make_mjcf_from_robot_description`, which is runnable with:
 
 ```bash
-ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py
+ros2 run mujoco_ros2_control make_mjcf_from_robot_description.py
 ```
 
 By default, the tool will pull a URDF from the `/robot_description` topic.
@@ -23,7 +22,7 @@ However, this is configurable at execution time.
 A complete list of options is available from the argument parser:
 
 ```bash
-$ ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py --help
+$ ros2 run mujoco_ros2_control make_mjcf_from_robot_description.py --help
 usage: make_mjcf_from_robot_description.py [-h] [-u URDF] [-r ROBOT_DESCRIPTION] [-m MUJOCO_INPUTS] [-o OUTPUT] [-c] [-f]
 
 Convert a full URDF to MJCF for use in Mujoco
@@ -42,11 +41,12 @@ options:
   -f, --add_free_joint  Adds a free joint as the base link for mobile robots
 ```
 
-A sample URDF and inputs file is provided in [test_robot.urdf](test/test_robot.urdf).
+A sample URDF and inputs file are provided in [test_robot.urdf](../test/test_resources/test_robot.urdf) and [test_inputs.xml](../test/test_resources/test_inputs.xml).
+
 To convert the URDF, run the following from the repo root
 
 ```bash
-ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py -u test/test_resources/test_robot.urdf  -m test/test_resources/test_inputs.xml -o /tmp/output/
+ros2 run mujoco_ros2_control make_mjcf_from_robot_description.py -u test/test_resources/test_robot.urdf  -m test/test_resources/test_inputs.xml -o /tmp/output/
 ```
 
 The `/tmp/output/` directory will contain all necessary assets and MJCF files that can be copied into the relevant locations in a config package.
@@ -69,7 +69,7 @@ For example, to convert the ChonkUR robot, we can use the inputs from the `clr_m
 ros2 launch clr_description view_robot.launch.py
 
 # Then process the urdf, note you MUST break down the .objs by passing `-c`.
-ros2 run mujoco_ros2_simulation make_mjcf_from_robot_description.py -c -m $(ros2 pkg prefix clr_mujoco_config --share)/description/mujoco_inputs.xml -o /tmp/clr_output/
+ros2 run mujoco_ros2_control make_mjcf_from_robot_description.py -c -m $(ros2 pkg prefix clr_mujoco_config --share)/description/mujoco_inputs.xml -o /tmp/clr_output/
 ```
 
 Like above, this will dump all necessary data to the `/tmp/clr_output/` directory, which can then be copied or modified as needed.

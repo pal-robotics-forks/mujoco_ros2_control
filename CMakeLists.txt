@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(mujoco_ros2_simulation)
+project(mujoco_ros2_control)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -11,6 +11,7 @@ find_package(ament_cmake REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(glfw3 REQUIRED)
+find_package(control_toolbox REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -37,7 +38,7 @@ elseif(DEFINED ENV{MUJOCO_INSTALL_DIR})
 else()
   include(FetchContent)
   # Detect architecture
-  set(MUJOCO_VERSION "3.3.4")
+  set(MUJOCO_VERSION "3.4.0")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     set(CPU_ARCH "x86_64")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
@@ -71,7 +72,13 @@ else()
 
   set(MUJOCO_INCLUDE_DIR ${MUJOCO_DIR}/include)
   set(MUJOCO_SIMULATE_DIR ${MUJOCO_DIR}/simulate)
-  message(STATUS "MuJoCo library found: ${MUJOCO_LIB}")
+
+  message(STATUS "Installing ${MUJOCO_LIB} to the install directory...")
+  install(
+    DIRECTORY ${MUJOCO_DIR}/lib/
+    DESTINATION lib
+    FILES_MATCHING PATTERN "libmujoco.so*"
+  )
 endif()
 
 
@@ -142,12 +149,16 @@ target_link_libraries(libsimulate PUBLIC lodepng mujoco::platform_ui_adapter ${M
 target_compile_options(libsimulate PRIVATE ${MUJOCO_SILENCE_COMPILER_WARNINGS})
 
 # Mujoco ROS 2 control system interface (this package)
-add_library(mujoco_ros2_simulation SHARED
+add_library(mujoco_ros2_control SHARED
     src/mujoco_system_interface.cpp
     src/mujoco_cameras.cpp
     src/mujoco_lidar.cpp
 )
-target_link_libraries(mujoco_ros2_simulation
+# Ensure MuJoCo library can be found at runtime regardless of how it was installed above
+set_target_properties(mujoco_ros2_control PROPERTIES
+  INSTALL_RPATH "\$ORIGIN/../lib;${CMAKE_INSTALL_PREFIX}/lib"
+)
+target_link_libraries(mujoco_ros2_control
   ${MUJOCO_LIB}
   ${sensor_msgs_TARGETS}
   mujoco::libsimulate
@@ -158,22 +169,23 @@ target_link_libraries(mujoco_ros2_simulation
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
+  control_toolbox::control_toolbox
   sensor_msgs::sensor_msgs_library
   Eigen3::Eigen
   Threads::Threads
   lodepng
   glfw
 )
-target_include_directories(mujoco_ros2_simulation PUBLIC
+target_include_directories(mujoco_ros2_control PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 # Mark these as system packages to prevent compiler warnings
-target_include_directories(mujoco_ros2_simulation SYSTEM PUBLIC
+target_include_directories(mujoco_ros2_control SYSTEM PUBLIC
   ${MUJOCO_INCLUDE_DIR}
   ${MUJOCO_SIMULATE_DIR}
 )
-install(TARGETS mujoco_ros2_simulation
+install(TARGETS mujoco_ros2_control
   LIBRARY DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -195,7 +207,7 @@ install(PROGRAMS
 )
 
 install(
-  DIRECTORY resources
+  DIRECTORY resources scripts
   DESTINATION share/${PROJECT_NAME}
 )
 

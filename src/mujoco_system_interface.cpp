@@ -17,7 +17,7 @@
  * under the License.
  */
 
-#include "mujoco_ros2_simulation/mujoco_system_interface.hpp"
+#include "mujoco_ros2_control/mujoco_system_interface.hpp"
 #include "array_safety.h"
 
 #include <cerrno>
@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -35,9 +36,18 @@
 #include <string>
 #include <thread>
 
+#include <tinyxml2.h>
+#include <std_msgs/msg/string.hpp>
+#include <unordered_map>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <hardware_interface/lexical_casts.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 #include <pluginlib/class_list_macros.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include "lodepng.h"
+
+#include "control_toolbox/pid.hpp"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
@@ -50,10 +60,115 @@ const int kErrorLength = 1024;           // load error string length
 
 using Seconds = std::chrono::duration<double>;
 
-namespace mujoco_ros2_simulation
+/// \brief vector with the current actuator for each joint
+std::unordered_map<std::string, std::string> actuator_map;
+
+namespace mujoco_ros2_control
 {
 namespace mj = ::mujoco;
 namespace mju = ::mujoco::sample_util;
+
+/**
+ * No-op UI adapter to support running the drivers in a headless environment.
+ */
+class HeadlessAdapter : public mj::PlatformUIAdapter
+{
+public:
+  HeadlessAdapter() = default;
+  ~HeadlessAdapter() override = default;
+
+  std::pair<double, double> GetCursorPosition() const override
+  {
+    return { 0.0, 0.0 };
+  }
+  double GetDisplayPixelsPerInch() const override
+  {
+    return 96.0;
+  }
+  std::pair<int, int> GetFramebufferSize() const override
+  {
+    return { 800, 600 };
+  }
+  std::pair<int, int> GetWindowSize() const override
+  {
+    return { 800, 600 };
+  }
+  bool IsGPUAccelerated() const override
+  {
+    return false;
+  }
+  void PollEvents() override
+  {
+  }
+  void SetClipboardString(const char* /*text*/) override
+  {
+  }
+  void SetVSync(bool /*enabled*/) override
+  {
+  }
+  void SetWindowTitle(const char* /*title*/) override
+  {
+  }
+  bool ShouldCloseWindow() const override
+  {
+    return false;
+  }
+  void SwapBuffers() override
+  {
+  }
+  void ToggleFullscreen() override
+  {
+  }
+
+  bool IsLeftMouseButtonPressed() const override
+  {
+    return false;
+  }
+  bool IsMiddleMouseButtonPressed() const override
+  {
+    return false;
+  }
+  bool IsRightMouseButtonPressed() const override
+  {
+    return false;
+  }
+
+  bool IsAltKeyPressed() const override
+  {
+    return false;
+  }
+  bool IsCtrlKeyPressed() const override
+  {
+    return false;
+  }
+  bool IsShiftKeyPressed() const override
+  {
+    return false;
+  }
+
+  bool IsMouseButtonDownEvent(int /*act*/) const override
+  {
+    return false;
+  }
+  bool IsKeyDownEvent(int /*act*/) const override
+  {
+    return false;
+  }
+
+  int TranslateKeyCode(int /*key*/) const override
+  {
+    return 0;
+  }
+  mjtButton TranslateMouseButton(int /*button*/) const override
+  {
+    return mjBUTTON_NONE;
+  }
+
+  bool RefreshMjrContext(const mjModel* /*m*/, int /*fontscale*/) override
+  {
+    return false;
+  }
+};
 
 // Clamps v to the lo or high value
 double clamp(double v, double lo, double hi)
@@ -178,21 +293,16 @@ const char* Diverged(int disableflags, const mjData* d)
   return nullptr;
 }
 
-mjModel* LoadModel(const char* file, mj::Simulate& sim)
+mjModel* loadModelFromFile(const char* file, mj::Simulate& sim)
 {
+  mjModel* mnew = 0;
+
   // this copy is needed so that the mju::strlen call below compiles
   char filename[mj::Simulate::kMaxFilenameLength];
   mju::strcpy_arr(filename, file);
 
-  // make sure filename is not empty
-  if (!filename[0])
-  {
-    return nullptr;
-  }
-
   // load and compile
   char loadError[kErrorLength] = "";
-  mjModel* mnew = 0;
   auto load_start = mj::Simulate::Clock::now();
   if (mju::strlen_arr(filename) > 4 && !std::strncmp(filename + mju::strlen_arr(filename) - 4, ".mjb",
                                                      mju::sizeof_arr(filename) - mju::strlen_arr(filename) + 4))
@@ -242,8 +352,111 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim)
   }
 
   mju::strcpy_arr(sim.load_error, loadError);
-
   return mnew;
+}
+
+mjModel* loadModelFromTopic(rclcpp::Node::SharedPtr node)
+{
+  mjModel* mnew = 0;
+  std::string robot_description;
+
+  rclcpp::QoS qos_profile(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default));
+  qos_profile.reliable().transient_local().keep_last(1);
+  RCLCPP_INFO(node->get_logger(), "Trying to get the mujoco model from topic");
+
+  // Try to get mujoco_model via topic
+  auto mujoco_model_sub = node->create_subscription<std_msgs::msg::String>(
+      "/mujoco_robot_description", qos_profile, [&](const std_msgs::msg::String::SharedPtr msg) {
+        if (!msg->data.empty() && robot_description.empty())
+          robot_description = msg->data;
+      });
+
+  auto start = std::chrono::steady_clock::now();
+  auto timeout = std::chrono::seconds(10);
+
+  while (robot_description.empty() && rclcpp::ok())
+  {
+    auto now = std::chrono::steady_clock::now();
+
+    RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000, "Waiting for /mujoco_robot_description...");
+
+    if (now - start > timeout)
+    {
+      RCLCPP_WARN(node->get_logger(), "Timeout waiting for /mujoco_robot_description topic.");
+      break;
+    }
+
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  if (!robot_description.empty())
+  {
+    // Load Mujoco model
+    char error[1000] = "Could not load XML model";
+
+    mjSpec* spec = nullptr;
+    spec = mj_parseXMLString(robot_description.c_str(), nullptr, error, 1000);
+    mnew = mj_compile(spec, nullptr);
+
+    if (!mnew)
+    {
+      const char* myerr = mjs_getError(spec);
+      RCLCPP_INFO(node->get_logger(), "Error %s", myerr);
+      RCLCPP_FATAL(node->get_logger(), "Failed to compile MuJoCo model: %s", error);
+      mj_deleteSpec(spec);
+    }
+    mj_deleteSpec(spec);
+    RCLCPP_INFO(node->get_logger(), "Model body count: %d", mnew->nbody);
+    RCLCPP_INFO(node->get_logger(), "Model geom count: %d", mnew->ngeom);
+  }
+  return mnew;
+}
+
+mjModel* LoadModel(const char* file, mj::Simulate& sim, rclcpp::Node::SharedPtr node)
+{
+  // Try to get the mujoco model from URDF.
+  // If it is not available, create a subscription and listen for the model on a topic.
+
+  // this copy is needed so that the mju::strlen call below compiles
+  char filename[mj::Simulate::kMaxFilenameLength];
+  mju::strcpy_arr(filename, file);
+
+  // load model from path if the filename is not empty
+  if (filename[0])
+  {
+    return loadModelFromFile(file, sim);
+  }
+  // Try to get the mujoco model from topic
+  return loadModelFromTopic(node);
+}
+
+ActuatorType getActuatorType(const mjModel* mj_model, int mujoco_actuator_id)
+{
+  // Returns the MuJoCo actuator type based on the actuator's bias settings.
+  ActuatorType actuator_type = ActuatorType::UNKNOWN;
+  int biastype = mj_model->actuator_biastype[mujoco_actuator_id];
+  const int NBias = 10;
+  const mjtNum* biasprm = mj_model->actuator_biasprm + mujoco_actuator_id * NBias;
+
+  if (biastype == mjBIAS_NONE)
+  {
+    actuator_type = ActuatorType::MOTOR;
+  }
+  else if (biastype == mjBIAS_AFFINE && biasprm[1] != 0)
+  {
+    actuator_type = ActuatorType::POSITION;
+  }
+  else if (biastype == mjBIAS_AFFINE && biasprm[1] == 0 && biasprm[2] != 0)
+  {
+    actuator_type = ActuatorType::VELOCITY;
+  }
+  else
+  {
+    // If none of the standard bias patterns match, classify as a custom actuator
+    actuator_type = ActuatorType::CUSTOM;
+  }
+
+  return actuator_type;
 }
 
 MujocoSystemInterface::MujocoSystemInterface() = default;
@@ -321,29 +534,43 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   const auto model_path_maybe = get_parameter("mujoco_model");
   if (!model_path_maybe.has_value())
   {
-    RCLCPP_FATAL(rclcpp::get_logger("MujocoSystemInterface"), "Missing 'mujoco_model' in <hardware_parameters>.");
-    return hardware_interface::CallbackReturn::ERROR;
+    RCLCPP_INFO(get_logger(), "Parameter 'mujoco_model' not found in URDF.");
+    model_path_.clear();
   }
-  model_path_ = model_path_maybe.value();
-
-  RCLCPP_INFO_STREAM(rclcpp::get_logger("MujocoSystemInterface"), "Loading 'mujoco_model' from: " << model_path_);
+  else
+  {
+    model_path_ = model_path_maybe.value();
+    // trim the trailing and leading whitespaces
+    model_path_.erase(0, model_path_.find_first_not_of(" \t\n\r\f\v"));
+    model_path_.erase(model_path_.find_last_not_of(" \t\n\r\f\v") + 1);
+    const std::filesystem::path path_to_file(model_path_);
+    if (!std::filesystem::exists(path_to_file))
+    {
+      RCLCPP_FATAL(get_logger(), "MuJoCo model file '%s' does not exist!", model_path_.c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    RCLCPP_INFO(get_logger(), "Loading 'mujoco_model' from: '%s'", model_path_.c_str());
+  }
 
   // Pull the initial speed factor from the hardware parameters, if present
   sim_speed_factor_ = std::stod(get_parameter("sim_speed_factor").value_or("-1"));
   if (sim_speed_factor_ > 0)
   {
-    RCLCPP_INFO_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                       "Running the simulation at " << sim_speed_factor_ * 100.0 << " percent speed");
+    RCLCPP_INFO(get_logger(), "Running the simulation at %.2f percent speed", sim_speed_factor_ * 100.0);
   }
   else
   {
-    RCLCPP_INFO_STREAM(rclcpp::get_logger("MujocoSystemInterface"), "No sim_speed set, using the setting from the UI");
+    RCLCPP_INFO(get_logger(), "No sim_speed set, using the setting from the UI");
   }
 
   // Pull the camera publish rate out of the info, if present, otherwise default to 5 hz.
   const auto camera_publish_rate = std::stod(get_parameter("camera_publish_rate").value_or("5.0"));
   // Pull the lidar publish rate out of the info, if present, otherwise default to 5 hz.
   const auto lidar_publish_rate = std::stod(get_parameter("lidar_publish_rate").value_or("5.0"));
+
+  // Check for headless mode
+  bool headless = hardware_interface::parse_bool(get_parameter("headless").value_or("false"));
+  RCLCPP_INFO_EXPRESSION(get_logger(), headless, "Running in HEADLESS mode.");
 
   // We essentially reconstruct the 'simulate.cc::main()' function here, and
   // launch a Simulate object with all necessary rendering process/options
@@ -364,21 +591,62 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   auto sim_ready = std::make_shared<std::promise<void>>();
   std::future<void> sim_ready_future = sim_ready->get_future();
 
-  // Launch the UI loop in the background
-  ui_thread_ = std::thread([this, sim_ready]() {
-    sim_ = std::make_unique<mj::Simulate>(std::make_unique<mj::GlfwAdapter>(), &cam_, &opt_, &pert_,
+  if (headless)
+  {
+    sim_ = std::make_unique<mj::Simulate>(std::make_unique<HeadlessAdapter>(), &cam_, &opt_, &pert_,
                                           /* is_passive = */ false);
     // Notify sim that we are ready
     sim_ready->set_value();
+  }
+  else
+  {
+    // Launch the UI loop in the background
+    ui_thread_ = std::thread([this, sim_ready]() {
+      sim_ = std::make_unique<mj::Simulate>(std::make_unique<mj::GlfwAdapter>(), &cam_, &opt_, &pert_,
+                                            /* is_passive = */ false);
 
-    RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Starting the mujoco rendering thread...");
-    // Blocks until terminated
-    sim_->RenderLoop();
-  });
+      // Add ros2 control icon for the taskbar
+      std::string icon_location =
+          ament_index_cpp::get_package_share_directory("mujoco_ros2_control") + "/resources/mujoco_logo.png";
+      std::vector<unsigned char> image;
+      unsigned width, height;
+      unsigned error = lodepng::decode(image, width, height, icon_location);
+
+      // Only process the icon if we successfully loaded it. Otherwise, just proceed without
+      if (error)
+      {
+        RCLCPP_WARN_STREAM(get_logger(), "LodePNG error " << error << ": " << lodepng_error_text(error)
+                                                          << ". Icon file not loaded: " << icon_location);
+      }
+      else
+      {
+        GLFWimage icon;
+        icon.width = width;
+        icon.height = height;
+        icon.pixels = image.data();
+        glfwSetWindowIcon(glfwGetCurrentContext(), 1, &icon);
+      }
+
+      // Set glfw window size to max size of the primary monitor
+      const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+      glfwSetWindowSize(glfwGetCurrentContext(), mode->width, mode->height);
+
+      // Hide UI panels programmatically
+      sim_->ui0_enable = false;  // Hide left panel
+      sim_->ui1_enable = false;  // Hide right panel
+
+      // Notify sim that we are ready
+      sim_ready->set_value();
+
+      // Blocks until terminated
+      RCLCPP_INFO(get_logger(), "Starting the mujoco rendering thread...");
+      sim_->RenderLoop();
+    });
+  }
 
   if (sim_ready_future.wait_for(2s) == std::future_status::timeout)
   {
-    RCLCPP_FATAL(rclcpp::get_logger("MujocoSystemInterface"), "Timed out waiting to start simulation rendering!");
+    RCLCPP_FATAL(get_logger(), "Timed out waiting to start simulation rendering!");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -388,10 +656,42 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Load the model and data prior to hw registration and starting the physics thread
   sim_->LoadMessage(model_path_.c_str());
-  mj_model_ = LoadModel(model_path_.c_str(), *sim_);
+
+  // Construct and start the ROS node spinning
+  /// The PIDs config file
+  const auto pids_config_file = get_parameter("pids_config_file");
+  rclcpp::NodeOptions node_options;
+  node_options.append_parameter_override("use_sim_time", rclcpp::ParameterValue(true));
+  if (pids_config_file.has_value())
+  {
+    std::string pids_config_file_path = pids_config_file.value();
+    // trim the trailing and leading whitespaces
+    pids_config_file_path.erase(0, pids_config_file_path.find_first_not_of(" \t\n\r\f\v"));
+    pids_config_file_path.erase(pids_config_file_path.find_last_not_of(" \t\n\r\f\v") + 1);
+
+    // Check if the file exists
+    const std::filesystem::path path_to_file(pids_config_file_path);
+    if (!std::filesystem::exists(path_to_file))
+    {
+      RCLCPP_FATAL(get_logger(), "PID config file '%s' does not exist!", pids_config_file->c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    RCLCPP_INFO_STREAM(get_logger(), "Loading PID config from file: " << pids_config_file.value());
+    auto node_options_arguments = node_options.arguments();
+    node_options_arguments.push_back(RCL_ROS_ARGS_FLAG);
+    node_options_arguments.push_back(RCL_PARAM_FILE_FLAG);
+    node_options_arguments.push_back(pids_config_file.value());
+    node_options.arguments(node_options_arguments);
+  }
+  executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>();
+  mujoco_node_ = std::make_shared<rclcpp::Node>("mujoco_node", node_options);
+  executor_->add_node(mujoco_node_);
+  executor_thread_ = std::thread([this]() { executor_->spin(); });
+
+  mj_model_ = LoadModel(model_path_.c_str(), *sim_, mujoco_node_);
   if (!mj_model_)
   {
-    RCLCPP_FATAL(rclcpp::get_logger("MujocoSystemInterface"), "Mujoco failed to load '%s'", model_path_.c_str());
+    RCLCPP_FATAL(get_logger(), "Mujoco failed to load the model");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -402,7 +702,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   }
   if (!mj_data_ || !mj_data_control_)
   {
-    RCLCPP_FATAL(rclcpp::get_logger("MujocoSystemInterface"), "Could not allocate mjData for '%s'", model_path_.c_str());
+    RCLCPP_FATAL(get_logger(), "Could not allocate mjData for '%s'", model_path_.c_str());
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -411,34 +711,44 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   register_sensors(get_hardware_info());
   set_initial_pose();
 
-  // Construct and start the ROS node spinning
-  executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>();
-  mujoco_node_ = std::make_shared<rclcpp::Node>("mujoco_node");
-  executor_->add_node(mujoco_node_);
-  executor_thread_ = std::thread([this]() { executor_->spin(); });
-
   // Time publisher will be pushed from the physics_thread_
   clock_publisher_ = mujoco_node_->create_publisher<rosgraph_msgs::msg::Clock>("/clock", 1);
+  clock_realtime_publisher_ =
+      std::make_shared<realtime_tools::RealtimePublisher<rosgraph_msgs::msg::Clock>>(clock_publisher_);
 
   // Ready cameras
-  RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Initializing cameras...");
+  RCLCPP_INFO(get_logger(), "Initializing cameras...");
   cameras_ = std::make_unique<MujocoCameras>(mujoco_node_, sim_mutex_, mj_data_, mj_model_, camera_publish_rate);
   cameras_->register_cameras(get_hardware_info());
 
   // Configure Lidar sensors
-  RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Initializing lidar...");
+  RCLCPP_INFO(get_logger(), "Initializing lidar...");
   lidar_sensors_ = std::make_unique<MujocoLidar>(mujoco_node_, sim_mutex_, mj_data_, mj_model_, lidar_publish_rate);
   if (!lidar_sensors_->register_lidar(get_hardware_info()))
   {
-    RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Failed to initialize lidar, exiting...");
+    RCLCPP_INFO(get_logger(), "Failed to initialize lidar, exiting...");
     return hardware_interface::CallbackReturn::FAILURE;
   }
 
+  // Disable the rangefinder flag at startup so that we don't get the yellow lines.
+  // We can still turn this on manually if desired.
+  sim_->opt.flags[mjVIS_RANGEFINDER] = false;
+
   // When the interface is activated, we start the physics engine.
-  physics_thread_ = std::thread([this]() {
+  physics_thread_ = std::thread([this, headless]() {
     // Load the simulation and do an initial forward pass
-    RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Starting the mujoco physics thread...");
-    sim_->Load(mj_model_, mj_data_, model_path_.c_str());
+    RCLCPP_INFO(get_logger(), "Starting the mujoco physics thread...");
+    if (headless)
+    {
+      const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+      sim_->m_ = mj_model_;
+      sim_->d_ = mj_data_;
+      mju::strcpy_arr(sim_->filename, model_path_.c_str());
+    }
+    else
+    {
+      sim_->Load(mj_model_, mj_data_, model_path_.c_str());
+    }
     // lock the sim mutex
     {
       const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
@@ -471,9 +781,10 @@ std::vector<hardware_interface::StateInterface> MujocoSystemInterface::export_st
         {
           new_state_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_VELOCITY, &joint.velocity);
         }
-        else if (state_if.name == hardware_interface::HW_IF_EFFORT)
+        else if (state_if.name == hardware_interface::HW_IF_EFFORT ||
+                 state_if.name == hardware_interface::HW_IF_TORQUE || state_if.name == hardware_interface::HW_IF_FORCE)
         {
-          new_state_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_EFFORT, &joint.effort);
+          new_state_interfaces.emplace_back(joint.name, state_if.name, &joint.effort);
         }
       }
     }
@@ -611,15 +922,20 @@ std::vector<hardware_interface::CommandInterface> MujocoSystemInterface::export_
       {
         if (command_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos)
         {
-          new_command_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_POSITION, &joint.position_command);
+          if (joint.is_position_control_enabled || joint.is_position_pid_control_enabled)
+            new_command_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_POSITION, &joint.position_command);
         }
         else if (command_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
         {
-          new_command_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_VELOCITY, &joint.velocity_command);
+          if (joint.is_velocity_control_enabled || joint.is_velocity_pid_control_enabled)
+            new_command_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_VELOCITY, &joint.velocity_command);
         }
-        else if (command_if.name == hardware_interface::HW_IF_EFFORT)
+        else if (command_if.name == hardware_interface::HW_IF_EFFORT ||
+                 command_if.name == hardware_interface::HW_IF_TORQUE ||
+                 command_if.name == hardware_interface::HW_IF_FORCE)
         {
-          new_command_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_EFFORT, &joint.effort_command);
+          if (joint.is_effort_control_enabled)
+            new_command_interfaces.emplace_back(joint.name, command_if.name, &joint.effort_command);
         }
       }
     }
@@ -630,8 +946,7 @@ std::vector<hardware_interface::CommandInterface> MujocoSystemInterface::export_
 
 hardware_interface::CallbackReturn MujocoSystemInterface::on_activate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
-              "Activating MuJoCo hardware interface and starting Simulate threads...");
+  RCLCPP_INFO(get_logger(), "Activating MuJoCo hardware interface and starting Simulate threads...");
 
   // Start camera and sensor rendering loops
   cameras_->init();
@@ -643,8 +958,7 @@ hardware_interface::CallbackReturn MujocoSystemInterface::on_activate(const rclc
 hardware_interface::CallbackReturn
 MujocoSystemInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
-              "Deactivating MuJoCo hardware interface and shutting down Simulate...");
+  RCLCPP_INFO(get_logger(), "Deactivating MuJoCo hardware interface and shutting down Simulate...");
 
   // TODO: Should we shut mujoco things down here or in the destructor?
 
@@ -659,8 +973,7 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
     size_t delimiter_pos = interface_name.find('/');
     if (delimiter_pos == std::string::npos)
     {
-      RCLCPP_ERROR(rclcpp::get_logger("MujocoSystemInterface"), "Invalid interface name format: %s",
-                   interface_name.c_str());
+      RCLCPP_ERROR(get_logger(), "Invalid interface name format: %s", interface_name.c_str());
       return;
     }
 
@@ -673,8 +986,7 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
 
     if (joint_it == joint_states_.end())
     {
-      RCLCPP_WARN(rclcpp::get_logger("MujocoSystemInterface"), "Joint %s not found in joint_states_",
-                  joint_name.c_str());
+      RCLCPP_WARN(get_logger(), "Joint %s not found in joint_states_", joint_name.c_str());
       return;
     }
 
@@ -685,24 +997,39 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
       joint_it->is_position_control_enabled = false;
       joint_it->is_velocity_control_enabled = false;
       joint_it->is_effort_control_enabled = false;
+      joint_it->is_position_pid_control_enabled = false;
+      joint_it->is_velocity_pid_control_enabled = false;
 
       if (interface_type == hardware_interface::HW_IF_POSITION)
       {
-        joint_it->is_position_control_enabled = true;
-        RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
-                    "Joint %s: position control enabled (velocity, effort disabled)", joint_name.c_str());
+        if (joint_it->actuator_type == ActuatorType::POSITION)
+        {
+          joint_it->is_position_control_enabled = true;
+        }
+        else if (joint_it->has_pos_pid)
+        {
+          joint_it->is_position_pid_control_enabled = true;
+        }
+        RCLCPP_INFO(get_logger(), "Joint %s: position control enabled (velocity, effort disabled)", joint_name.c_str());
       }
       else if (interface_type == hardware_interface::HW_IF_VELOCITY)
       {
-        joint_it->is_velocity_control_enabled = true;
-        RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
-                    "Joint %s: velocity control enabled (position, effort disabled)", joint_name.c_str());
+        if (joint_it->actuator_type == ActuatorType::VELOCITY)
+        {
+          joint_it->is_velocity_control_enabled = true;
+        }
+        else if (joint_it->has_vel_pid)
+        {
+          joint_it->is_velocity_pid_control_enabled = true;
+        }
+        RCLCPP_INFO(get_logger(), "Joint %s: velocity control enabled (position, effort disabled)", joint_name.c_str());
       }
-      else if (interface_type == hardware_interface::HW_IF_EFFORT)
+      else if (interface_type == hardware_interface::HW_IF_EFFORT ||
+               interface_type == hardware_interface::HW_IF_TORQUE || interface_type == hardware_interface::HW_IF_FORCE)
       {
         joint_it->is_effort_control_enabled = true;
-        RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"),
-                    "Joint %s: effort control enabled (position, velocity disabled)", joint_name.c_str());
+        RCLCPP_INFO(get_logger(), "Joint %s: %s control enabled (position, velocity disabled)", joint_name.c_str(),
+                    interface_type.c_str());
       }
     }
     else
@@ -710,17 +1037,19 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
       if (interface_type == hardware_interface::HW_IF_POSITION)
       {
         joint_it->is_position_control_enabled = false;
+        joint_it->is_position_pid_control_enabled = false;
       }
       else if (interface_type == hardware_interface::HW_IF_VELOCITY)
       {
         joint_it->is_velocity_control_enabled = false;
+        joint_it->is_velocity_pid_control_enabled = false;
       }
-      else if (interface_type == hardware_interface::HW_IF_EFFORT)
+      else if (interface_type == hardware_interface::HW_IF_EFFORT ||
+               interface_type == hardware_interface::HW_IF_TORQUE || interface_type == hardware_interface::HW_IF_FORCE)
       {
         joint_it->is_effort_control_enabled = false;
       }
-      RCLCPP_INFO(rclcpp::get_logger("MujocoSystemInterface"), "Joint %s: %s control disabled", joint_name.c_str(),
-                  interface_type.c_str());
+      RCLCPP_INFO(get_logger(), "Joint %s: %s control disabled", joint_name.c_str(), interface_type.c_str());
     }
   };
 
@@ -783,7 +1112,7 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
 }
 
 hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time& /*time*/,
-                                                             const rclcpp::Duration& /*period*/)
+                                                             const rclcpp::Duration& period)
 {
   // Update mimic joints
   for (auto& joint_state : joint_states_)
@@ -813,9 +1142,19 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
     {
       mj_data_control_->ctrl[joint_state.mj_actuator_id] = joint_state.position_command;
     }
+    else if (joint_state.is_position_pid_control_enabled)
+    {
+      double error = joint_state.position_command - mj_data_->qpos[joint_state.mj_pos_adr];
+      mj_data_control_->qfrc_applied[joint_state.mj_vel_adr] = joint_state.pos_pid->compute_command(error, period);
+    }
     else if (joint_state.is_velocity_control_enabled)
     {
       mj_data_control_->ctrl[joint_state.mj_actuator_id] = joint_state.velocity_command;
+    }
+    else if (joint_state.is_velocity_pid_control_enabled)
+    {
+      double error = joint_state.velocity_command - mj_data_->qvel[joint_state.mj_vel_adr];
+      mj_data_control_->qfrc_applied[joint_state.mj_vel_adr] = joint_state.vel_pid->compute_command(error, period);
     }
     else if (joint_state.is_effort_control_enabled)
     {
@@ -830,14 +1169,45 @@ void MujocoSystemInterface::register_joints(const hardware_interface::HardwareIn
 {
   joint_states_.resize(hardware_info.joints.size());
 
+  // Pull the name of the file to load for starting config, if present. We only override start position if that
+  // parameter exists and it is not an empty string
+  bool should_override_start_position = false;
+  auto it = hardware_info.hardware_parameters.find("override_start_position_file");
+  if (it != hardware_info.hardware_parameters.end())
+  {
+    should_override_start_position = !it->second.empty();
+  }
+
+  // If we have that file present, load the initial positions from that file to the appropriate mj_data_ structures
+  if (should_override_start_position)
+  {
+    std::string override_start_position_file = it->second;
+    bool success = set_override_start_positions(override_start_position_file);
+    if (!success)
+    {
+      RCLCPP_ERROR(get_logger(),
+                   "Failed to load override start positions from %s. Falling back to urdf initial positions.",
+                   override_start_position_file.c_str());
+      should_override_start_position = false;
+    }
+    else
+    {
+      RCLCPP_INFO(get_logger(), "Loaded initial positions from file %s.", override_start_position_file.c_str());
+    }
+  }
+  else
+  {
+    RCLCPP_INFO(get_logger(),
+                "override_start_position_file not passed. Loading initial positions from ros2_control xacro.");
+  }
+
   for (size_t joint_index = 0; joint_index < hardware_info.joints.size(); joint_index++)
   {
     auto joint = hardware_info.joints.at(joint_index);
     int mujoco_joint_id = mj_name2id(mj_model_, mjtObj::mjOBJ_JOINT, joint.name.c_str());
     if (mujoco_joint_id == -1)
     {
-      RCLCPP_ERROR_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                          "Failed to find joint in mujoco model, joint name: " << joint.name);
+      RCLCPP_ERROR_STREAM(get_logger(), "Failed to find joint in mujoco model, joint name: " << joint.name);
       continue;
     }
 
@@ -856,12 +1226,6 @@ void MujocoSystemInterface::register_joints(const hardware_interface::HardwareIn
     // Is no mapping was found, try fallback to looking for an actuator with the same name as the joint
     mujoco_actuator_id = mujoco_actuator_id == -1 ? mj_name2id(mj_model_, mjtObj::mjOBJ_ACTUATOR, joint.name.c_str()) :
                                                     mujoco_actuator_id;
-
-    if (mujoco_actuator_id == -1)
-    {
-      // This isn't a failure the joint just won't be controllable
-      RCLCPP_WARN_STREAM(rclcpp::get_logger("MujocoSystemInterface"), "No actuator found for joint: " << joint.name);
-    }
 
     // Add to the joint hw information map
     joint_hw_info_.insert(std::make_pair(joint.name, joint));
@@ -915,49 +1279,196 @@ void MujocoSystemInterface::register_joints(const hardware_interface::HardwareIn
       }
     };
 
-    // Set initial values if they are set in the info
+    // Set initial values if they are set in the info, or from override start position file
     for (const auto& state_if : joint.state_interfaces)
     {
       if (state_if.name == hardware_interface::HW_IF_POSITION)
       {
-        last_joint_state.position = get_initial_value(state_if);
+        last_joint_state.position =
+            should_override_start_position ? mj_data_->qpos[joint_state.mj_pos_adr] : get_initial_value(state_if);
       }
       else if (state_if.name == hardware_interface::HW_IF_VELOCITY)
       {
-        last_joint_state.velocity = get_initial_value(state_if);
+        last_joint_state.velocity =
+            should_override_start_position ? mj_data_->qvel[joint_state.mj_vel_adr] : get_initial_value(state_if);
       }
-      else if (state_if.name == hardware_interface::HW_IF_EFFORT)
+      else if (state_if.name == hardware_interface::HW_IF_EFFORT || state_if.name == hardware_interface::HW_IF_TORQUE ||
+               state_if.name == hardware_interface::HW_IF_FORCE)
       {
+        // We never set data for effort from an initial conditions file, so just default to the initial value if it exists.
         last_joint_state.effort = get_initial_value(state_if);
       }
     }
 
+    if (mujoco_actuator_id == -1)
+    {
+      // This isn't a failure the joint just won't be controllable
+      RCLCPP_WARN_STREAM(get_logger(), "No actuator found for joint: " << joint.name);
+      continue;
+    }
+
+    // Determine the MuJoCo actuator type
+    last_joint_state.actuator_type = getActuatorType(mj_model_, mujoco_actuator_id);
+    if (last_joint_state.actuator_type == ActuatorType::CUSTOM)
+    {
+      RCLCPP_INFO(get_logger(), "Custom MuJoCo actuator for the joint : %s , using all command interfaces",
+                  joint.name.c_str());
+    }
+
     // command interfaces
     // overwrite joint limit with min/max value
+    bool has_command_interfaces = false;
     for (const auto& command_if : joint.command_interfaces)
     {
+      has_command_interfaces = true;
       // If available, always default to position control at the start
       if (command_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos)
       {
-        last_joint_state.is_position_control_enabled = true;
-        last_joint_state.position_command = last_joint_state.position;
+        // Position command interface
+        // Direct control for position actuators; position PID required for velocity, motor, or custom actuators.
+
+        if (last_joint_state.actuator_type == ActuatorType::POSITION)
+        {
+          RCLCPP_INFO(get_logger(), "Using MuJoCo position actuator for the joint : '%s'", joint.name.c_str());
+          // Direct position control enabled for position actuator
+          last_joint_state.is_position_control_enabled = true;
+          last_joint_state.position_command =
+              should_override_start_position ? mj_data_->ctrl[joint_state.mj_actuator_id] : last_joint_state.position;
+        }
+        else if (last_joint_state.actuator_type == ActuatorType::VELOCITY ||
+                 last_joint_state.actuator_type == ActuatorType::MOTOR ||
+                 last_joint_state.actuator_type == ActuatorType::CUSTOM)
+        {
+          last_joint_state.pos_pid =
+              std::make_shared<control_toolbox::PidROS>(mujoco_node_, "pid_gains.position." + joint.name, "", false);
+          last_joint_state.pos_pid->initialize_from_ros_parameters();
+          const auto gains = last_joint_state.pos_pid->get_gains();
+          last_joint_state.has_pos_pid =
+              std::isfinite(gains.p_gain_) && std::isfinite(gains.i_gain_) && std::isfinite(gains.d_gain_);
+          if (last_joint_state.has_pos_pid)
+          {
+            last_joint_state.is_position_pid_control_enabled = true;
+            last_joint_state.position_command = last_joint_state.position;
+            const auto gains = last_joint_state.pos_pid->get_gains();
+
+            RCLCPP_INFO(get_logger(),
+                        "Position control PID gains for joint %s : P=%.4f, I=%.4f, D=%.4f, Imax=%.4f, Imin=%.4f, "
+                        "Umin=%.4f, Umax=%.4f, antiwindup_strategy=%s",
+                        joint.name.c_str(), gains.p_gain_, gains.i_gain_, gains.d_gain_, gains.antiwindup_strat_.i_max,
+                        gains.antiwindup_strat_.i_min, gains.u_min_, gains.u_max_,
+                        gains.antiwindup_strat_.to_string().c_str());
+          }
+          else
+          {
+            RCLCPP_ERROR(get_logger(),
+                         "Position command interface for the joint : %s is not supported with velocity or motor "
+                         "actuator without defining the PIDs",
+                         joint.name.c_str());
+          }
+        }
       }
       else if (command_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
       {
-        last_joint_state.is_velocity_control_enabled = true;
-        last_joint_state.velocity_command = last_joint_state.velocity;
+        // Velocity command interface:
+        // Direct control for velocity actuators; velocity PID required for motor or custom actuators.
+        RCLCPP_ERROR_EXPRESSION(get_logger(), last_joint_state.actuator_type == ActuatorType::POSITION,
+                                "Velocity command interface for the joint : %s is not supported with position actuator",
+                                joint.name.c_str());
+        if (last_joint_state.actuator_type == ActuatorType::VELOCITY)
+        {
+          RCLCPP_INFO(get_logger(), "Using MuJoCo velocity actuator for the joint : '%s'", joint.name.c_str());
+          // Direct velocity control enabled for velocity actuator
+          last_joint_state.is_velocity_control_enabled = true;
+          last_joint_state.velocity_command =
+              should_override_start_position ? mj_data_->ctrl[joint_state.mj_actuator_id] : last_joint_state.velocity;
+        }
+        else if (last_joint_state.actuator_type == ActuatorType::MOTOR ||
+                 last_joint_state.actuator_type == ActuatorType::CUSTOM)
+        {
+          last_joint_state.vel_pid =
+              std::make_shared<control_toolbox::PidROS>(mujoco_node_, "pid_gains.velocity." + joint.name, "", false);
+          last_joint_state.vel_pid->initialize_from_ros_parameters();
+          const auto gains = last_joint_state.vel_pid->get_gains();
+          last_joint_state.has_vel_pid =
+              std::isfinite(gains.p_gain_) && std::isfinite(gains.i_gain_) && std::isfinite(gains.d_gain_);
+
+          if (last_joint_state.has_vel_pid)
+          {
+            last_joint_state.is_velocity_pid_control_enabled = true;
+            const auto gains = last_joint_state.vel_pid->get_gains();
+            last_joint_state.velocity_command = last_joint_state.velocity;
+            RCLCPP_INFO(get_logger(),
+                        "Velocity control PID gains for joint %s : P=%.4f, I=%.4f, D=%.4f, Imax=%.4f, Imin=%.4f, "
+                        "Umin=%.4f, Umax=%.4f, antiwindup_strategy=%s",
+                        joint.name.c_str(), gains.p_gain_, gains.i_gain_, gains.d_gain_, gains.antiwindup_strat_.i_max,
+                        gains.antiwindup_strat_.i_min, gains.u_min_, gains.u_max_,
+                        gains.antiwindup_strat_.to_string().c_str());
+          }
+          else
+          {
+            RCLCPP_ERROR(get_logger(),
+                         "Velocity command interface for the joint : %s is not supported with motor or custom actuator "
+                         "without defining the PIDs",
+                         joint.name.c_str());
+          }
+        }
       }
-      else if (command_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
+      else if (command_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos ||
+               command_if.name.find(hardware_interface::HW_IF_TORQUE) != std::string::npos ||
+               command_if.name.find(hardware_interface::HW_IF_FORCE) != std::string::npos)
       {
-        last_joint_state.is_effort_control_enabled = true;
-        last_joint_state.effort_command = last_joint_state.effort;
+        // Effort command interface:
+        // Direct control for effort actuators; not supported for position or velocity actuators.
+        RCLCPP_ERROR_EXPRESSION(
+            get_logger(),
+            last_joint_state.actuator_type == ActuatorType::POSITION ||
+                last_joint_state.actuator_type == ActuatorType::VELOCITY,
+            "Effort command interface for the joint : %s is not supported with position or velocity actuator."
+            "Skipping it.",
+            joint.name.c_str());
+        if (last_joint_state.actuator_type == ActuatorType::MOTOR ||
+            last_joint_state.actuator_type == ActuatorType::CUSTOM)
+        {
+          RCLCPP_INFO(get_logger(), "Using MuJoCo motor or custom actuator for the joint : '%s'", joint.name.c_str());
+          // Direct effort control enabled for MOTOR or CUSTOM actuator
+          last_joint_state.is_effort_control_enabled = true;
+          last_joint_state.effort_command =
+              should_override_start_position ? mj_data_->ctrl[joint_state.mj_actuator_id] : last_joint_state.effort;
+        }
       }
+    }
+    if (!has_command_interfaces)
+    {
+      RCLCPP_INFO(get_logger(), "Joint : %s is a passive joint", joint.name.c_str());
+    }
+    else if (!last_joint_state.is_position_control_enabled && !last_joint_state.is_velocity_control_enabled &&
+             !last_joint_state.is_effort_control_enabled && !last_joint_state.is_position_pid_control_enabled &&
+             !last_joint_state.is_velocity_pid_control_enabled)
+    {
+      throw std::runtime_error(std::string("Joint '") + joint.name +
+                               "' has an unsupported command interface for the specified MuJoCo actuator");
+    }
+
+    // When we override the start position, we set qpos from that file. Otherwise, we need to set it from initial
+    // conditions from the urdf.
+    if (!should_override_start_position)
+    {
+      set_initial_pose();
     }
   }
 }
 
 void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareInfo& hardware_info)
 {
+  // Helper function to get parameters in hardware info.
+  auto get_parameter_or = [&](const std::string& key, const std::string& default_value) -> std::string {
+    if (auto it = get_hardware_info().hardware_parameters.find(key); it != get_hardware_info().hardware_parameters.end())
+    {
+      return it->second;
+    }
+    return default_value;
+  };
+
   for (size_t sensor_index = 0; sensor_index < hardware_info.sensors.size(); sensor_index++)
   {
     auto sensor = hardware_info.sensors.at(sensor_index);
@@ -965,7 +1476,7 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
 
     if (sensor.parameters.count("mujoco_type") == 0)
     {
-      RCLCPP_INFO_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
+      RCLCPP_INFO_STREAM(get_logger(),
                          "Not adding hardware interface for sensor in ros2_control xacro: " << sensor_name);
       continue;
     }
@@ -983,9 +1494,8 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
       mujoco_sensor_name = sensor.parameters.at("mujoco_sensor_name");
     }
 
-    RCLCPP_INFO_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                       "Adding sensor named: " << sensor_name << ", of type: " << mujoco_type
-                                               << ", mapping to the MJCF sensor: " << mujoco_sensor_name);
+    RCLCPP_INFO_STREAM(get_logger(), "Adding sensor named: " << sensor_name << ", of type: " << mujoco_type
+                                                             << ", mapping to the MJCF sensor: " << mujoco_sensor_name);
 
     // Add to the sensor hw information map
     sensors_hw_info_.insert(std::make_pair(sensor_name, sensor));
@@ -994,15 +1504,15 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
     {
       FTSensorData sensor_data;
       sensor_data.name = sensor_name;
-      sensor_data.force.name = mujoco_sensor_name + "_force";
-      sensor_data.torque.name = mujoco_sensor_name + "_torque";
+      sensor_data.force.name = mujoco_sensor_name + get_parameter_or("force_mjcf_suffix", "_force");
+      sensor_data.torque.name = mujoco_sensor_name + get_parameter_or("torque_mjcf_suffix", "_torque");
 
       int force_sensor_id = mj_name2id(mj_model_, mjOBJ_SENSOR, sensor_data.force.name.c_str());
       int torque_sensor_id = mj_name2id(mj_model_, mjOBJ_SENSOR, sensor_data.torque.name.c_str());
 
       if (force_sensor_id == -1 || torque_sensor_id == -1)
       {
-        RCLCPP_ERROR_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
+        RCLCPP_ERROR_STREAM(get_logger(),
                             "Failed to find force/torque sensor in mujoco model, sensor name: " << sensor.name);
         continue;
       }
@@ -1017,9 +1527,11 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
     {
       IMUSensorData sensor_data;
       sensor_data.name = sensor_name;
-      sensor_data.orientation.name = mujoco_sensor_name + "_quat";
-      sensor_data.angular_velocity.name = mujoco_sensor_name + "_gyro";
-      sensor_data.linear_acceleration.name = mujoco_sensor_name + "_accel";
+      sensor_data.orientation.name = mujoco_sensor_name + get_parameter_or("orientation_mjcf_suffix", "_quat");
+      sensor_data.angular_velocity.name =
+          mujoco_sensor_name + get_parameter_or("angular_velocity_mjcf_suffix", "_gyro");
+      sensor_data.linear_acceleration.name =
+          mujoco_sensor_name + get_parameter_or("linear_acceleration_mjcf_suffix", "_accel");
 
       // Initialize to all zeros as we do not use these yet.
       sensor_data.orientation_covariance.resize(9, 0.0);
@@ -1032,8 +1544,7 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
 
       if (quat_id == -1 || gyro_id == -1 || accel_id == -1)
       {
-        RCLCPP_ERROR_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                            "Failed to find IMU sensor in mujoco model, sensor name: " << sensor.name);
+        RCLCPP_ERROR_STREAM(get_logger(), "Failed to find IMU sensor in mujoco model, sensor name: " << sensor.name);
         continue;
       }
 
@@ -1045,10 +1556,76 @@ void MujocoSystemInterface::register_sensors(const hardware_interface::HardwareI
     }
     else
     {
-      RCLCPP_ERROR_STREAM(rclcpp::get_logger("MujocoSystemInterface"),
-                          "Invalid mujoco_type passed to the mujoco hardware interface: " << mujoco_type);
+      RCLCPP_ERROR_STREAM(get_logger(), "Invalid mujoco_type passed to the mujoco hardware interface: " << mujoco_type);
     }
   }
+}
+
+bool MujocoSystemInterface::set_override_start_positions(const std::string& override_start_position_file)
+{
+  tinyxml2::XMLDocument doc;
+  if (doc.LoadFile(override_start_position_file.c_str()) != tinyxml2::XML_SUCCESS)
+  {
+    RCLCPP_ERROR_STREAM(get_logger(),
+                        "Failed to load override start position file " << override_start_position_file.c_str() << ".");
+    return false;
+  }
+
+  // get the <key> element
+  tinyxml2::XMLElement* keyElem = doc.FirstChildElement("key");
+  if (!keyElem)
+  {
+    RCLCPP_ERROR_STREAM(get_logger(), "<key> element not found in override start position file.");
+    return false;
+  }
+
+  auto parseAttr = [&](tinyxml2::XMLElement* elem, const char* attrName) -> std::vector<double> {
+    std::vector<double> result;
+
+    const char* text = elem->Attribute(attrName);
+    if (!text)
+    {
+      RCLCPP_ERROR_STREAM(get_logger(), "Attribute '" << attrName << "' not found in override start position file.");
+      return result;  // return empty vector
+    }
+
+    std::stringstream ss(text);
+    double v;
+    while (ss >> v)
+    {
+      result.push_back(v);
+    }
+
+    return result;
+  };
+
+  std::vector<double> qpos = parseAttr(keyElem, "qpos");
+  std::vector<double> qvel = parseAttr(keyElem, "qvel");
+  std::vector<double> ctrl = parseAttr(keyElem, "ctrl");
+
+  // we already put out an error message saying that it couldn't load specific things, so we don't need to say anything else
+  if (qpos.empty() || qvel.empty() || ctrl.empty())
+  {
+    return false;
+  }
+
+  if ((qpos.size() != static_cast<size_t>(mj_model_->nq)) || (qvel.size() != static_cast<size_t>(mj_model_->nv)) ||
+      (ctrl.size() != static_cast<size_t>(mj_model_->nu)))
+  {
+    RCLCPP_ERROR_STREAM(
+        get_logger(), "Mismatch in data types in override starting positions. Numbers are:\n\t"
+                          << "qpos size in file: " << qpos.size() << ", qpos size in model: " << mj_model_->nq << "\n\t"
+                          << "qvel size in file: " << qvel.size() << ", qvel size in model: " << mj_model_->nv << "\n\t"
+                          << "ctrl size in file: " << ctrl.size() << ", ctrl size in model: " << mj_model_->nu);
+    return false;
+  }
+
+  // copy data from the input information into the mj_data_ object
+  std::copy(qpos.begin(), qpos.end(), mj_data_->qpos);
+  std::copy(qvel.begin(), qvel.end(), mj_data_->qvel);
+  std::copy(ctrl.begin(), ctrl.end(), mj_data_->ctrl);
+
+  return true;
 }
 
 void MujocoSystemInterface::set_initial_pose()
@@ -1073,8 +1650,7 @@ void MujocoSystemInterface::PhysicsLoop()
   while (!sim_->exitrequest.load())
   {
     // sleep for 1 ms or yield, to let main thread run
-    //  yield results in busy wait - which has better timing but kills battery
-    //  life
+    //  yield results in busy wait - which has better timing but kills battery life
     if (sim_->run && sim_->busywait)
     {
       std::this_thread::yield();
@@ -1124,6 +1700,7 @@ void MujocoSystemInterface::PhysicsLoop()
 
             // Copy data to the control
             mju_copy(mj_data_->ctrl, mj_data_control_->ctrl, mj_model_->nu);
+            mju_copy(mj_data_->qfrc_applied, mj_data_control_->qfrc_applied, mj_model_->nu);
             // run single step, let next iteration deal with timing
             mj_step(mj_model_, mj_data_);
 
@@ -1148,8 +1725,9 @@ void MujocoSystemInterface::PhysicsLoop()
             double refreshTime = kSimRefreshFraction / sim_->refresh_rate;
 
             // step while sim lags behind cpu and within refreshTime.
-            while (Seconds((mj_data_->time - syncSim) * speedFactor) < mj::Simulate::Clock::now() - syncCPU &&
-                   mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime))
+            auto currentCPU = mj::Simulate::Clock::now();
+            while (Seconds((mj_data_->time - syncSim) * speedFactor) < currentCPU - syncCPU &&
+                   currentCPU - startCPU < Seconds(refreshTime))
             {
               // measure slowdown before first step
               if (!measured && elapsedSim)
@@ -1157,11 +1735,19 @@ void MujocoSystemInterface::PhysicsLoop()
                 sim_->measured_slowdown = std::chrono::duration<double>(elapsedCPU).count() / elapsedSim;
                 measured = true;
               }
-              // inject noise
+// inject noise
+// Use mjVERSION_HEADER and if it is greater than 337 then do one thing or another
+// Needed due to
+// https://github.com/google-deepmind/mujoco/commit/401bf431b8b0fe6e0a619412a607b5135dc4ded4#diff-3dc22ceeebd71304c41d349c6d273bda172ea88ff49c772dbdcf51b9b19bbd33R2943
+#if mjVERSION_HEADER < 337
               sim_->InjectNoise();
+#else
+              sim_->InjectNoise(-1);
+#endif
 
               // Copy data to the control
               mju_copy(mj_data_->ctrl, mj_data_control_->ctrl, mj_model_->nu);
+              mju_copy(mj_data_->qfrc_applied, mj_data_control_->qfrc_applied, mj_model_->nu);
               // call mj_step
               mj_step(mj_model_, mj_data_);
 
@@ -1181,6 +1767,9 @@ void MujocoSystemInterface::PhysicsLoop()
               {
                 break;
               }
+
+              // Update current CPU time for next iteration
+              currentCPU = mj::Simulate::Clock::now();
             }
           }
 
@@ -1220,10 +1809,37 @@ void MujocoSystemInterface::publish_clock()
 
   rosgraph_msgs::msg::Clock sim_time_msg;
   sim_time_msg.clock = sim_time_ros;
-  clock_publisher_->publish(sim_time_msg);
+  clock_realtime_publisher_->try_publish(sim_time_msg);
 }
 
-}  // namespace mujoco_ros2_simulation
+void MujocoSystemInterface::get_model(mjModel*& dest)
+{
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  dest = mj_copyModel(dest, mj_model_);
+}
+
+void MujocoSystemInterface::get_data(mjData*& dest)
+{
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  if (dest == nullptr)
+  {
+    dest = mj_makeData(mj_model_);
+  }
+  mj_copyData(dest, mj_model_, mj_data_);
+}
+
+void MujocoSystemInterface::set_data(mjData* mj_data)
+{
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  mj_copyData(mj_data_, mj_model_, mj_data);
+}
+
+rclcpp::Logger MujocoSystemInterface::get_logger() const
+{
+  return logger_;
+}
+
+}  // namespace mujoco_ros2_control
 
 #include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS(mujoco_ros2_simulation::MujocoSystemInterface, hardware_interface::SystemInterface);
+PLUGINLIB_EXPORT_CLASS(mujoco_ros2_control::MujocoSystemInterface, hardware_interface::SystemInterface);

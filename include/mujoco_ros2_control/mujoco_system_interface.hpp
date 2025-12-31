@@ -33,6 +33,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp>
 #include <rclcpp_lifecycle/state.hpp>
+#include <realtime_tools/realtime_publisher.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 
 #include <mujoco/mujoco.h>
@@ -41,11 +42,11 @@
 #include "glfw_adapter.h"  // for mj::GlfwAdapter
 #include "simulate.h"      // must be on your include path, handled by CMake
 
-#include "mujoco_ros2_simulation/data.hpp"
-#include "mujoco_ros2_simulation/mujoco_cameras.hpp"
-#include "mujoco_ros2_simulation/mujoco_lidar.hpp"
+#include "mujoco_ros2_control/data.hpp"
+#include "mujoco_ros2_control/mujoco_cameras.hpp"
+#include "mujoco_ros2_control/mujoco_lidar.hpp"
 
-namespace mujoco_ros2_simulation
+namespace mujoco_ros2_control
 {
 class MujocoSystemInterface : public hardware_interface::SystemInterface
 {
@@ -73,6 +74,30 @@ public:
 
   hardware_interface::return_type read(const rclcpp::Time& time, const rclcpp::Duration& period) override;
   hardware_interface::return_type write(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+
+  /**
+   * @brief Returns a copy of the MuJoCo model.
+   *
+   * This method locks the simulation mutex to ensure thread safety.
+   * @param dest Pointer to an mjModel structure where the copy will be stored. The pointer will be allocated if it is nullptr.
+   */
+  void get_model(mjModel*& dest);
+
+  /**
+   * @brief Returns a copy of the current MuJoCo data.
+   *
+   * This method locks the simulation mutex to ensure thread safety.
+   * @param dest Pointer to an mjData structure where the copy will be stored. The pointer will be allocated if it is nullptr.
+   */
+  void get_data(mjData*& dest);
+
+  /**
+   * @brief Sets the MuJoCo data to the provided value.
+   *
+   * This method locks the simulation mutex to ensure thread safety.
+   * @param mj_data Pointer to an mjData structure containing the new data.
+   */
+  void set_data(mjData* mj_data);
 
 private:
   /**
@@ -137,6 +162,14 @@ private:
   void register_sensors(const hardware_interface::HardwareInfo& info);
 
   /**
+   * @brief Sets the initial simulation conditions (pos, vel, ctrl) values from provided filepath.
+   *
+   * @param override_start_position_file filepath that contains starting positions
+   * @return success of reading the file and setting the positions
+   */
+  bool set_override_start_positions(const std::string& override_start_position_file);
+
+  /**
    * @brief Set the initial pose for all actuators if provided in the URDF.
    */
   void set_initial_pose();
@@ -153,6 +186,8 @@ private:
    */
   void publish_clock();
 
+  rclcpp::Logger get_logger() const;
+
   // System information
   std::string model_path_;
 
@@ -167,6 +202,9 @@ private:
   mjvCamera cam_;
   mjvOption opt_;
   mjvPerturb pert_;
+
+  // Logger
+  rclcpp::Logger logger_ = rclcpp::get_logger("MujocoSystemInterface");
 
   // Speed scaling parameter. if set to >0 then we ignore the value set in the simulate app and instead
   // attempt to loop at whatever this is set to. If this is <0, then we use the value from the app.
@@ -186,6 +224,7 @@ private:
 
   // Primary clock publisher for the world
   std::shared_ptr<rclcpp::Publisher<rosgraph_msgs::msg::Clock>> clock_publisher_;
+  realtime_tools::RealtimePublisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_realtime_publisher_;
 
   // Containers for RGB-D cameras
   std::unique_ptr<MujocoCameras> cameras_;
@@ -210,4 +249,4 @@ private:
   std::vector<IMUSensorData> imu_sensor_data_;
 };
 
-}  // namespace mujoco_ros2_simulation
+}  // namespace mujoco_ros2_control
