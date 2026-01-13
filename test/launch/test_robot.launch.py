@@ -162,6 +162,16 @@ def generate_launch_description():
         output="both",
     )
 
+    spawn_gripper_controller = Node(
+        package="controller_manager",
+        executable="spawner",
+        name="spawn_position_controller",
+        arguments=[
+            "gripper_controller",
+        ],
+        output="both",
+    )
+
     return LaunchDescription(
         [
             use_pid,
@@ -173,5 +183,6 @@ def generate_launch_description():
             control_node,
             spawn_joint_state_broadcaster,
             spawn_position_controller,
+            spawn_gripper_controller,
         ]
     )
