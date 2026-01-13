@@ -17,8 +17,6 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(Threads REQUIRED)
-find_package(transmission_interface REQUIRED)
-find_package(backward_ros REQUIRED)
 
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
@@ -173,7 +171,6 @@ target_link_libraries(mujoco_ros2_control
   rclcpp_lifecycle::rclcpp_lifecycle
   control_toolbox::control_toolbox
   sensor_msgs::sensor_msgs_library
-  transmission_interface::transmission_interface
   Eigen3::Eigen
   Threads::Threads
   lodepng
