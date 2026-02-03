@@ -44,7 +44,7 @@ DECOMPOSED_PATH_NAME = "decomposed"
 COMPOSED_PATH_NAME = "full"
 
 
-def add_mujoco_info(raw_xml, output_filepath, publish_topic, no_fuse=False):
+def add_mujoco_info(raw_xml, output_filepath, publish_topic, fuse=True):
     dom = minidom.parseString(raw_xml)
 
     mujoco_element = dom.createElement("mujoco")
@@ -61,7 +61,7 @@ def add_mujoco_info(raw_xml, output_filepath, publish_topic, no_fuse=False):
     compiler_element.setAttribute("discardvisual", "false")
     compiler_element.setAttribute("strippath", "false")
 
-    if no_fuse:
+    if not fuse:
         # Prevents merging of static bodies (like the fixed root link)
         compiler_element.setAttribute("fusestatic", "false")
 
@@ -1620,9 +1620,10 @@ def main(args=None):
         help="Adds a free joint before the root link of the robot in the urdf before conversion",
     )
     parser.add_argument(
-        "--no-fuse",
-        action="store_true",
-        help="Prevents MuJoCo from merging static bodies (useful for fixed-base robots to preserve the root link)",
+        "--fuse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allows MuJoCo to merge static bodies. Use --no-fuse to prevent merging.",
     )
     parser.add_argument(
         "-a",
@@ -1705,13 +1706,13 @@ def main(args=None):
     # Add a free joint to the urdf
     # Only add the virtual link structure if we allow fusing.
     # If no-fuse is on, we skip this and add the freejoint directly in add_free_joint.
-    if request_add_free_joint and not parsed_args.no_fuse:
+    if request_add_free_joint and parsed_args.fuse:
         urdf = add_urdf_free_joint(urdf)
 
     print(f"Using destination directory: {output_filepath}")
 
     # Add required mujoco tags to the starting URDF
-    xml_data = add_mujoco_info(urdf, output_filepath, parsed_args.publish_topic, parsed_args.no_fuse)
+    xml_data = add_mujoco_info(urdf, output_filepath, parsed_args.publish_topic, parsed_args.fuse)
 
     # get rid of collision data, assuming the visual data is much better resolution.
     # not sure if this is the best move...
