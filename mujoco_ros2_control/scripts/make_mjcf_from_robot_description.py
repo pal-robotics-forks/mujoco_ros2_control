@@ -1010,7 +1010,7 @@ def add_free_joint(dom, urdf, joint_name="floating_base_joint"):
             print(f"Adding free joint directly to root body: {root_link}")
             new_joint = dom.createElement("freejoint")
             new_joint.setAttribute("name", joint_name)
-            
+
             # Insert at the top of the body
             if body.hasChildNodes():
                 body.insertBefore(new_joint, body.firstChild)
@@ -1019,6 +1019,7 @@ def add_free_joint(dom, urdf, joint_name="floating_base_joint"):
             return dom
 
     raise ValueError("Did not find virtual_base_joint nor a body matching the URDF root to add a free joint.")
+
 
 def add_links_as_sites(urdf, dom, add_free_joint):
     """
@@ -1702,7 +1703,7 @@ def main(args=None):
             raise ValueError("Output folder must be different from (or not inside) the assets folder")
 
     # Add a free joint to the urdf
-    # Only add the virtual link structure if we allow fusing. 
+    # Only add the virtual link structure if we allow fusing.
     # If no-fuse is on, we skip this and add the freejoint directly in add_free_joint.
     if request_add_free_joint and not parsed_args.no_fuse:
         urdf = add_urdf_free_joint(urdf)
