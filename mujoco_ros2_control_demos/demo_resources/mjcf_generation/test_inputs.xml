@@ -56,6 +56,7 @@
     <!-- Note that the type and name elements are required -->
     <modify_element type="joint" name="joint1" frictionloss="1.0" damping="2.0"/>
     <modify_element type="body" name="forearm" gravcomp="1.0"/>
+    <site name="joint1_imu" pos="0.1 0.02 0.001" quat="0 -0.707107 0.707107 0" rgba="1 0 0 1" size="0.01 0.01 0.01" group="3" body_name="upperarm"/>
 
   </processed_inputs>
 </mujoco_inputs>

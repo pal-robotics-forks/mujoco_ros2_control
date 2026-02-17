@@ -770,7 +770,7 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             decompose_dict[name] = threshold
 
         # Grab cameras
-        if child.nodeType == child.ELEMENT_NODE and child.tagName == "camera":
+        elif child.nodeType == child.ELEMENT_NODE and child.tagName == "camera":
             camera_element = child
             site_name = camera_element.getAttribute("site")
             camera_name = camera_element.getAttribute("name")
@@ -782,7 +782,7 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             print(f"Will add camera ({camera_name}) for site ({site_name})")
 
         # Grab replicates
-        if child.nodeType == child.ELEMENT_NODE and child.tagName == "lidar":
+        elif child.nodeType == child.ELEMENT_NODE and child.tagName == "lidar":
             lidar_element = child
             site_name = lidar_element.getAttribute("ref_site")
             sensor_name = lidar_element.getAttribute("sensor_name")
@@ -814,7 +814,7 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             print(f"Will add replicate tag at site ({site_name})")
 
         # Grab modify element information
-        if child.nodeType == child.ELEMENT_NODE and child.tagName == "modify_element":
+        elif child.nodeType == child.ELEMENT_NODE and child.tagName == "modify_element":
             modify_element_element = child
 
             # get the attributes from the modify_element_tag
@@ -833,6 +833,13 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             print(f"Will add the following attributes to {element_type} '{element_name}':")
             for key, value in attr_dict.items():
                 print(f"  {key}: {value}")
+        # Throw an error if we encounter an unsupported tag to warn the user that they may have made a mistake in their
+        # xml (or) that they are trying to use a tag that isn't supported by the converter
+        else:
+            raise ValueError(
+                f"Unsupported tag encountered: '{child.tagName}' with content '{child.toxml()}' in <processed_inputs>."
+                " Supported tags are 'decompose_mesh', 'camera', 'lidar',and 'modify_element'."
+            )
 
     return decompose_dict, cameras_dict, modify_element_dict, lidar_dict
 
