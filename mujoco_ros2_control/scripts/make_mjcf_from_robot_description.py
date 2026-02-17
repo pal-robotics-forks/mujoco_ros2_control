@@ -750,9 +750,10 @@ def get_processed_mujoco_inputs(processed_inputs_element):
     cameras_dict = dict()
     modify_element_dict = dict()
     lidar_dict = dict()
+    sites_dict = dict()
 
     if not processed_inputs_element:
-        return decompose_dict, cameras_dict, modify_element_dict, lidar_dict
+        return decompose_dict, cameras_dict, modify_element_dict, lidar_dict, sites_dict
 
     for child in processed_inputs_element.childNodes:
         if child.nodeType != child.ELEMENT_NODE:
@@ -833,15 +834,25 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             print(f"Will add the following attributes to {element_type} '{element_name}':")
             for key, value in attr_dict.items():
                 print(f"  {key}: {value}")
+
+        # Add site_element information to bodies
+        elif child.nodeType == child.ELEMENT_NODE and child.tagName == "site":
+            site_element = child
+            site_body_name = site_element.getAttribute("body_name")
+            # Remove the body_name attribute because that is only used for processing and isn't needed in the MJCF
+            site_element.removeAttribute("body_name")
+            sites_dict[site_body_name] = site_element
+            print(f"Will add site : '{site_element.getAttribute('name')}' element to body ({site_body_name})")
+
         # Throw an error if we encounter an unsupported tag to warn the user that they may have made a mistake in their
         # xml (or) that they are trying to use a tag that isn't supported by the converter
         else:
             raise ValueError(
                 f"Unsupported tag encountered: '{child.tagName}' with content '{child.toxml()}' in <processed_inputs>."
-                " Supported tags are 'decompose_mesh', 'camera', 'lidar',and 'modify_element'."
+                " Supported tags are 'decompose_mesh', 'camera', 'lidar', 'modify_element', and 'site'."
             )
 
-    return decompose_dict, cameras_dict, modify_element_dict, lidar_dict
+    return decompose_dict, cameras_dict, modify_element_dict, lidar_dict, sites_dict
 
 
 def parse_inputs_xml(filename=None):
@@ -1104,6 +1115,26 @@ def add_links_as_sites(urdf, dom, add_free_joint):
     return dom
 
 
+def add_extra_sites_to_bodies(dom, sites_dict):
+    """
+    Adds sites to the bodies specified in the sites_dict. The sites_dict is a dictionary where the keys are the
+    body names and the values are the site elements to be added to those bodies.
+    """
+    for body_name, site_element in sites_dict.items():
+        status = False
+        for node in dom.getElementsByTagName("body"):
+            if node.getAttribute("name") == body_name:
+                print(f"Adding site '{site_element.getAttribute('name')}' to body ({body_name})")
+                imported_node = dom.importNode(site_element, True)
+                node.appendChild(imported_node)
+                status = True
+        if not status:
+            raise ValueError(
+                f"Did not find a body with name '{body_name}' to add site '{site_element.getAttribute('name')}' to."
+            )
+    return dom
+
+
 def multiply_quaternion(q1, q2):
     """
     Returns q1 * q2.
@@ -1304,6 +1335,7 @@ def fix_mujoco_description(
     cameras_dict,
     modify_element_dict,
     lidar_dict,
+    site_dict,
     request_add_free_joint,
 ):
     """
@@ -1341,6 +1373,9 @@ def fix_mujoco_description(
 
     # Add replicates based on site names
     dom = add_lidar_from_sites(dom, lidar_dict)
+
+    # Add extra sites to bodies based on body names
+    dom = add_extra_sites_to_bodies(dom, site_dict)
 
     # modify elements based on modify_element tags
     dom = add_modifiers(dom, modify_element_dict)
@@ -1706,7 +1741,9 @@ def main(args=None):
         write_mujoco_scene(scene_inputs, output_filepath)
         scene_inputs = None
 
-    decompose_dict, cameras_dict, modify_element_dict, lidar_dict = get_processed_mujoco_inputs(processed_inputs)
+    decompose_dict, cameras_dict, modify_element_dict, lidar_dict, site_dict = get_processed_mujoco_inputs(
+        processed_inputs
+    )
 
     if parsed_args.asset_dir:
         assets_filepath = parsed_args.asset_dir
@@ -1755,6 +1792,7 @@ def main(args=None):
         cameras_dict,
         modify_element_dict,
         lidar_dict,
+        site_dict,
         request_add_free_joint,
     )
 
