@@ -7,12 +7,17 @@ find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 
+set(msg_files
+  msg/ConstraintViolations.msg
+)
+
 set(srv_files
   srv/ResetWorld.srv
 )
 
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  ${msg_files}
   ${srv_files}
   DEPENDENCIES
     builtin_interfaces
