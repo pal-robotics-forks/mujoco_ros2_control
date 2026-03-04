@@ -1904,6 +1904,158 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
             assets_dir = os.path.join(output_dir, "assets")
             self.assertFalse(os.path.exists(assets_dir))
 
+    # def run_obj2mjcf_stl(self):
+    #     with tempfile.TemporaryDirectory() as tmpdir:
+    #       output_dir = os.path.join(tmpdir, "output")
+    #       assets_dir = os.path.join(output_dir, "assets")
+    #       full_dir = os.path.join(assets_dir, COMPOSED_PATH_NAME)
+    #       os.makedirs(full_dir)
+    #       mesh_file = os.path.join(full_dir, "mesh_name.stl")
+    #       with open(mesh_file, "w") as f:
+    #             f.write("# COMPOSED STL content")
+    #       decompose_dir = os.path.join(assets_dir, DECOMPOSED_PATH_NAME)
+    #       os.makedirs(decompose_dir)
+
+    #       mesh_info_dict = {
+    #             "mesh_name": {
+    #                 "is_pre_generated": False
+    #             }
+    #         }
+    #       decompose_dict = {}
+
+    #       run_obj2mjcf(output_dir,decompose_dict,mesh_info_dict)
+
+    #       self.assertTrue(os.path.exists(assets_dir))
+    #       self.assertTrue(os.path.exists(full_dir))
+    #       self.assertTrue(os.path.exists(mesh_file))
+    #       self.assertTrue(os.path.exists(decompose_dir))
+    #       metadata_file = os.path.join(decompose_dir, "metadata.json")
+    #       self.assertTrue(os.path.exists(metadata_file))
+
+    #       with open(metadata_file, "r") as f:
+    #           metadata_content = json.load(f)
+    #       self.assertEqual(metadata_content, {})
+
+    # def run_obj2mjcf_full_convert(self):
+    #     with tempfile.TemporaryDirectory() as tmpdir:
+    #       output_dir = os.path.join(tmpdir, "output")
+    #       assets_dir = os.path.join(output_dir, "assets")
+    #       full_dir = os.path.join(assets_dir, COMPOSED_PATH_NAME)
+    #       os.makedirs(full_dir)
+    #       mesh_file = os.path.join(full_dir, "mesh_name.obj")
+    #       mat_file = os.path.join(full_dir, "mtl_mesh_name")
+    #       with open(mesh_file, "w") as f:
+    #             f.write("# COMPOSED OBJ content")
+    #       with open(mat_file, "w") as f:
+    #             f.write("# COMPOSED MAT content")
+    #       decompose_dir = os.path.join(assets_dir, DECOMPOSED_PATH_NAME)
+    #       os.makedirs(decompose_dir)
+
+    #       mesh_info_dict = {
+    #             "mesh_name": {
+    #                 "is_pre_generated": False
+    #             }
+    #         }
+    #       decompose_dict = {}
+
+    #       run_obj2mjcf(output_dir,decompose_dict,mesh_info_dict)
+
+    #       self.assertTrue(os.path.exists(assets_dir))
+    #       self.assertTrue(os.path.exists(full_dir))
+    #       self.assertTrue(os.path.exists(mesh_file))
+    #       self.assertTrue(os.path.exists(mat_file))
+    #       created_file = os.path.join(full_dir, "mesh_name", "mesh_name.obj")
+    #       self.assertTrue(os.path.exists(created_file))
+    #       created_xml = os.path.join(full_dir, "mesh_name", "mesh_name.xml")
+    #       self.assertTrue(os.path.exists(created_xml))
+
+    #       self.assertTrue(os.path.exists(decompose_dir))
+    #       metadata_file = os.path.join(decompose_dir, "metadata.json")
+    #       self.assertTrue(os.path.exists(metadata_file))
+
+    #       with open(metadata_file, "r") as f:
+    #           metadata_content = json.load(f)
+    #       self.assertEqual(metadata_content, {})
+
+    # def run_obj2mjcf_decompose_convert(self):
+    #     with tempfile.TemporaryDirectory() as tmpdir:
+    #       output_dir = os.path.join(tmpdir, "output")
+    #       assets_dir = os.path.join(output_dir, "assets")
+    #       full_dir = os.path.join(assets_dir, COMPOSED_PATH_NAME)
+    #       os.makedirs(full_dir)
+    #       decompose_dir = os.path.join(assets_dir, DECOMPOSED_PATH_NAME)
+    #       os.makedirs(decompose_dir)
+    #       mesh_file = os.path.join(decompose_dir, "mesh_name.obj")
+    #       mat_file = os.path.join(decompose_dir, "mtl_mesh_name")
+    #       with open(mesh_file, "w") as f:
+    #             f.write("# COMPOSED OBJ content")
+    #       with open(mat_file, "w") as f:
+    #             f.write("# COMPOSED MAT content")
+
+    #       mesh_info_dict = {
+    #             "mesh_name": {
+    #                 "is_pre_generated": False
+    #             }
+    #         }
+    #       decompose_dict = {"mesh_name": "0.05"}
+
+    #       run_obj2mjcf(output_dir,decompose_dict,mesh_info_dict)
+
+    #       self.assertTrue(os.path.exists(assets_dir))
+    #       self.assertTrue(os.path.exists(full_dir))
+    #       self.assertEqual(len(os.listdir(full_dir)), 0)
+
+    #       self.assertTrue(os.path.exists(decompose_dir))
+    #       self.assertTrue(os.path.exists(mesh_file))
+    #       self.assertTrue(os.path.exists(mat_file))
+    #       created_file = os.path.join(decompose_dir, "mesh_name", "mesh_name.obj")
+    #       self.assertTrue(os.path.exists(created_file))
+    #       created_xml = os.path.join(decompose_dir, "mesh_name", "mesh_name.xml")
+    #       self.assertTrue(os.path.exists(created_xml))
+    #       created_material = os.path.join(decompose_dir, "mesh_name", "material.mtl")
+    #       self.assertTrue(os.path.exists(created_material))
+    #       metadata_file = os.path.join(decompose_dir, "metadata.json")
+    #       self.assertTrue(os.path.exists(metadata_file))
+
+    #       with open(metadata_file, "r") as f:
+    #           metadata_content = json.load(f)
+    #       self.assertEqual(metadata_content, {})
+
+    # def run_obj2mjcf_pre_generated(self):
+
+    #     scenari_decompose = [
+    #         {},
+    #         {"mesh_name": "0.05"}
+    #     ]
+
+    #     for scenario in scenari_decompose:
+    #       with tempfile.TemporaryDirectory() as tmpdir:
+    #         output_dir = os.path.join(tmpdir, "output")
+    #         assets_dir = os.path.join(output_dir, "assets")
+    #         full_dir = os.path.join(assets_dir, COMPOSED_PATH_NAME)
+    #         os.makedirs(full_dir)
+    #         decompose_dir = os.path.join(assets_dir, DECOMPOSED_PATH_NAME)
+    #         os.makedirs(decompose_dir)
+
+    #         mesh_info_dict = {
+    #               "mesh_name": {
+    #                   "is_pre_generated": True
+    #               }
+    #           }
+
+    #         run_obj2mjcf(output_dir,scenario, mesh_info_dict)
+
+    #         self.assertTrue(os.path.exists(assets_dir))
+    #         self.assertTrue(os.path.exists(full_dir))
+    #         self.assertEqual(len(os.listdir(full_dir)), 0)
+    #         self.assertTrue(os.path.exists(decompose_dir))
+    #         metadata_file = os.path.join(decompose_dir, "metadata.json")
+    #         self.assertTrue(os.path.exists(metadata_file))
+
+    #         with open(metadata_file, "r") as f:
+    #             metadata_content = json.load(f)
+    #         self.assertEqual(metadata_content, {})
+
 
 if __name__ == "__main__":
     unittest.main()
