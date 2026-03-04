@@ -897,6 +897,7 @@ def add_links_as_sites(urdf, dom, add_free_joint):
                     new_site.setAttribute("name", site[0])
                     new_site.setAttribute("pos", " ".join(map(str, site[1])))
                     new_site.setAttribute("quat", " ".join(map(str, site[2])))
+                    new_site.setAttribute("group", "3")
                     node.appendChild(new_site)
 
     # add the site elements for the root element into worldbody
