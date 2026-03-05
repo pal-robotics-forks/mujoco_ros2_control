@@ -2591,28 +2591,88 @@ void MujocoSystemInterface::reset_simulation_state(bool fill_initial_state)
 
     if (actuator.actuator_type != ActuatorType::PASSIVE)
     {
+      // Restore control mode flags to the same defaults that register_urdf_joints applies at startup:
+      // position control wins if supported, otherwise velocity, otherwise effort.
+      // Without this reset an actuator left in a different mode after a controller switch would
+      // receive zero commands on the next write() cycle, causing the robot to fall.
+      actuator.is_position_control_enabled = false;
+      actuator.is_position_pid_control_enabled = false;
+      actuator.is_velocity_control_enabled = false;
+      actuator.is_velocity_pid_control_enabled = false;
+      actuator.is_effort_control_enabled = false;
+
+      if (actuator.actuator_type == ActuatorType::POSITION)
+      {
+        actuator.is_position_control_enabled = true;
+      }
+      else if (actuator.actuator_type == ActuatorType::VELOCITY)
+      {
+        // Velocity actuator: position PID takes priority if configured (same as register_urdf_joints)
+        actuator.is_position_pid_control_enabled = actuator.has_pos_pid;
+        actuator.is_velocity_control_enabled = !actuator.has_pos_pid;
+      }
+      else  // MOTOR / CUSTOM
+      {
+        // Motor/custom: position PID > velocity PID > effort (same priority as register_urdf_joints)
+        if (actuator.has_pos_pid)
+        {
+          actuator.is_position_pid_control_enabled = true;
+        }
+        else if (actuator.has_vel_pid)
+        {
+          actuator.is_velocity_pid_control_enabled = true;
+        }
+        else
+        {
+          actuator.is_effort_control_enabled = true;
+        }
+      }
+
       // Set command to initial position to maintain position control at reset position
       actuator.position_interface.command_ = actuator.position_interface.state_;
       actuator.velocity_interface.command_ = 0.0;
       actuator.effort_interface.command_ = 0.0;
 
       // Also update the ctrl buffer in mj_data_control_ which is used by the physics loop
-      if (actuator.is_position_control_enabled && actuator.mj_actuator_id >= 0)
-      {
-        mj_data_control_->ctrl[actuator.mj_actuator_id] = actuator.position_interface.state_;
-      }
+      mj_data_control_->ctrl[actuator.mj_actuator_id] = actuator.position_interface.state_;
     }
   }
 
   // Update URDF joint states from actuator states
   actuator_state_to_joint_state();
 
-  // Set joint commands to current state (maintaining position control)
+  // Set joint commands to current state and restore control mode flags to their startup defaults.
   for (auto& joint : urdf_joint_data_)
   {
     joint.position_interface.command_ = joint.position_interface.state_;
     joint.velocity_interface.command_ = 0.0;
     joint.effort_interface.command_ = 0.0;
+
+    // Mirror the actuator control mode reset: position wins if the interface is present,
+    // otherwise velocity, otherwise effort — matching register_urdf_joints startup priority.
+    joint.is_position_control_enabled = false;
+    joint.is_velocity_control_enabled = false;
+    joint.is_effort_control_enabled = false;
+
+    const auto& ifaces = joint.command_interfaces;
+    const bool has_pos = std::find(ifaces.begin(), ifaces.end(), hardware_interface::HW_IF_POSITION) != ifaces.end();
+    const bool has_vel = std::find(ifaces.begin(), ifaces.end(), hardware_interface::HW_IF_VELOCITY) != ifaces.end();
+    const bool has_eff = std::find(ifaces.begin(), ifaces.end(), hardware_interface::HW_IF_EFFORT) != ifaces.end() ||
+                         std::find(ifaces.begin(), ifaces.end(), hardware_interface::HW_IF_TORQUE) != ifaces.end() ||
+                         std::find(ifaces.begin(), ifaces.end(), hardware_interface::HW_IF_FORCE) != ifaces.end();
+
+    if (has_pos)
+    {
+      joint.is_position_control_enabled = true;
+    }
+    else if (has_vel)
+    {
+      joint.is_velocity_control_enabled = true;
+    }
+    else if (has_eff)
+    {
+      joint.is_effort_control_enabled = true;
+    }
   }
 }
 
