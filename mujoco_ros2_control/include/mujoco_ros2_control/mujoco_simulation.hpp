@@ -63,10 +63,15 @@ namespace mujoco_ros2_control
  * Instead, consumers of this class are provided with functions to read all sim data and provide
  * control inputs from their own mjData containers.
  *
- * The three functions relevant to interacting with the physics sim's mjData are:
+ * The functions relevant to interacting with the physics sim's mjData are:
  *
  * `copy_physics_data(...)` will lock the sim and do a full copy of the existing `mj_data_`
  * into the provided container, which can be used as the caller requires.
+ *
+ * `copy_physics_state(...)` will lock the sim and copy only `qpos`/`qvel`/`qfrc_actuator`/
+ * `sensordata` -- the fields the ros2_control read() path actually consumes. Much cheaper than
+ * `copy_physics_data(...)` since it avoids the full mjData deep copy; use it whenever the caller
+ * doesn't need the rest of mjData.
  *
  * `apply_control_data(...)` will copy control inputs from the provided mjData into the physics
  * loop. Specifically, it copies `ctrl`, `qfrc_applied`, and `xfrc_applied`. `ctrl` and
@@ -192,6 +197,22 @@ public:
    * @note: If the destination is null it will be created.
    */
   void copy_physics_data(mjData*& destination);
+
+  /**
+   * @brief Copies only the fields of `mj_data_` consumed by the ros2_control read() path
+   * (`qpos`, `qvel`, `qfrc_actuator`, `sensordata`) into the provided container, in a thread
+   * safe way.
+   *
+   * This is a much cheaper alternative to `copy_physics_data()`, which performs a full
+   * `mj_copyData` deep copy of the entire mjData (solver buffers, contacts, jacobians, etc.).
+   * It locks the sim mutex for only as long as the four field copies take, rather than for a
+   * full struct copy, reducing contention with the physics loop.
+   *
+   * @note Only use this when the caller genuinely does not need the rest of mjData (e.g. no
+   * plugins are consuming kinematics fields like `xpos`/`xmat`/`xipos` from the snapshot).
+   * @note: If the destination is null it will be created.
+   */
+  void copy_physics_state(mjData*& destination);
 
   /**
    * @brief Copies control fields from `control_data` into the sim data in a thread safe way.

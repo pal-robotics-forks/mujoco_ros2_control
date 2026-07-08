@@ -450,6 +450,9 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     RCLCPP_FATAL(get_logger(), "Failed to register transmissions, exiting...");
     return hardware_interface::CallbackReturn::FAILURE;
   }
+  // mujoco_actuator_data_ and urdf_joint_data_ are both fully populated now, so the by-name
+  // matching between them can be cached once instead of redone every read()/write() cycle.
+  build_joint_actuator_index_map();
   initialize_initial_positions(get_hardware_info());
   set_initial_pose();
 
@@ -484,6 +487,11 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Load MuJoCo ROS2 Control plugins
   this->load_mujoco_plugins();
+
+  // Plugins can read arbitrary mjData fields (e.g. xpos/xmat/xipos) from mj_data_control_ in
+  // write(), so read() must keep snapshotting the full mjData when any are loaded. With no
+  // plugins, read() only needs qpos/qvel/qfrc_actuator/sensordata and can take the cheaper path.
+  snapshot_full_physics_data_ = !plugin_instances_.empty();
 
   RCLCPP_INFO(get_logger(), "on_init complete.");
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -808,7 +816,16 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
 hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& time, const rclcpp::Duration& /*period*/)
 {
   // Snapshot the latest physics state into our local copy to avoid locking for the whole method.
-  simulation_->copy_physics_data(mj_data_control_);
+  // Only take the expensive full mjData copy when a plugin needs more than qpos/qvel/
+  // qfrc_actuator/sensordata (see snapshot_full_physics_data_).
+  if (snapshot_full_physics_data_)
+  {
+    simulation_->copy_physics_data(mj_data_control_);
+  }
+  else
+  {
+    simulation_->copy_physics_state(mj_data_control_);
+  }
 
   // Joint states
   actuator_state_msg_.header.stamp = time;
@@ -992,16 +1009,18 @@ void MujocoSystemInterface::actuator_state_to_joint_state()
 
   // If the actuator name and joint name is same (which is the case for non transmission joints), we need to copy
   // the state from actuator to joint here as there is no transmission instance to do that.
+  // The matching actuator index was precomputed once in build_joint_actuator_index_map(), so this
+  // is a direct lookup rather than an O(joints x actuators) name comparison redone every cycle.
   for (auto& joint : urdf_joint_data_)
   {
-    std::for_each(mujoco_actuator_data_.begin(), mujoco_actuator_data_.end(), [&](auto& actuator_interface) {
-      if (actuator_interface.joint_name == joint.name)
-      {
-        joint.position_interface.state_ = actuator_interface.position_interface.state_;
-        joint.velocity_interface.state_ = actuator_interface.velocity_interface.state_;
-        joint.effort_interface.state_ = actuator_interface.effort_interface.state_;
-      }
-    });
+    if (joint.matching_actuator_index_ < 0)
+    {
+      continue;
+    }
+    const auto& actuator_interface = mujoco_actuator_data_.at(static_cast<size_t>(joint.matching_actuator_index_));
+    joint.position_interface.state_ = actuator_interface.position_interface.state_;
+    joint.velocity_interface.state_ = actuator_interface.velocity_interface.state_;
+    joint.effort_interface.state_ = actuator_interface.effort_interface.state_;
   }
 }
 
@@ -1021,16 +1040,40 @@ void MujocoSystemInterface::joint_command_to_actuator_command()
 
   // If the actuator name and joint name is same (which is the case for non transmission joints), we need to copy
   // the command from joint to actuator here as there is no transmission instance to do that.
+  // The matching actuator index was precomputed once in build_joint_actuator_index_map(), so this
+  // is a direct lookup rather than an O(joints x actuators) name comparison redone every cycle.
   for (auto& joint : urdf_joint_data_)
   {
-    std::for_each(mujoco_actuator_data_.begin(), mujoco_actuator_data_.end(), [&](auto& actuator_interface) {
-      if (actuator_interface.joint_name == joint.name && actuator_interface.actuator_type != ActuatorType::PASSIVE)
+    if (joint.matching_actuator_index_ < 0)
+    {
+      continue;
+    }
+    auto& actuator_interface = mujoco_actuator_data_.at(static_cast<size_t>(joint.matching_actuator_index_));
+    if (actuator_interface.actuator_type == ActuatorType::PASSIVE)
+    {
+      continue;
+    }
+    actuator_interface.position_interface.command_ = joint.position_interface.command_;
+    actuator_interface.velocity_interface.command_ = joint.velocity_interface.command_;
+    actuator_interface.effort_interface.command_ = joint.effort_interface.command_;
+  }
+}
+
+void MujocoSystemInterface::build_joint_actuator_index_map()
+{
+  for (auto& joint : urdf_joint_data_)
+  {
+    joint.matching_actuator_index_ = -1;
+    for (size_t i = 0; i < mujoco_actuator_data_.size(); ++i)
+    {
+      // Same by-name match previously redone every read()/write() cycle inside
+      // actuator_state_to_joint_state() and joint_command_to_actuator_command().
+      if (mujoco_actuator_data_.at(i).joint_name == joint.name)
       {
-        actuator_interface.position_interface.command_ = joint.position_interface.command_;
-        actuator_interface.velocity_interface.command_ = joint.velocity_interface.command_;
-        actuator_interface.effort_interface.command_ = joint.effort_interface.command_;
+        joint.matching_actuator_index_ = static_cast<long int>(i);
+        break;
       }
-    });
+    }
   }
 }
 

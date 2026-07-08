@@ -177,6 +177,18 @@ private:
   bool initialize_initial_positions(const hardware_interface::HardwareInfo& info);
 
   /**
+   * @brief Precomputes, for every entry in `urdf_joint_data_`, the index of the
+   * `mujoco_actuator_data_` entry that directly matches it by name (see
+   * `URDFJointData::matching_actuator_index_`).
+   *
+   * Must be called after both `register_mujoco_actuators()` and `register_urdf_joints()` have
+   * populated their respective vectors. This replaces the O(joints x actuators) name comparison
+   * that `actuator_state_to_joint_state()` and `joint_command_to_actuator_command()` used to
+   * perform on every read()/write() cycle with a single cached index per joint.
+   */
+  void build_joint_actuator_index_map();
+
+  /**
    * @brief Constructs all sensor data containers for the interface
    *
    * Pulls sensors (FTS and IMUs) out of the HardwareInfo and uses it to map relevant data containers
@@ -317,6 +329,13 @@ private:
   // Container for interacting with the underlying physics sim's data. This will be used to copy physics data
   // during `read` and to apply control inputs during `write`.
   mjData* mj_data_control_{ nullptr };
+
+  // When true, `read()` must snapshot the full mjData (via `copy_physics_data`) rather than the
+  // cheaper qpos/qvel/qfrc_actuator/sensordata-only snapshot (`copy_physics_state`). This is set
+  // in `on_init()` based on whether any plugins were loaded: plugins can read arbitrary mjData
+  // fields (e.g. `xpos`/`xmat`/`xipos`) from `mj_data_control_` in `write()`, so the full copy is
+  // only safe to skip when there are no plugins to feed.
+  bool snapshot_full_physics_data_{ true };
 
   // Data containers for the MuJoCo Actuators
   std::vector<MuJoCoActuatorData> mujoco_actuator_data_;

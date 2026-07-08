@@ -166,6 +166,14 @@ struct URDFJointData
   bool is_velocity_control_enabled{ false };
   bool is_effort_control_enabled{ false };
 
+  // Index into `mujoco_actuator_data_` of the actuator that directly matches this joint by name
+  // (i.e. `MuJoCoActuatorData::joint_name == this->name`), or -1 if there is none. This is the
+  // same match that non-transmission joints rely on to pass commands/states straight through to
+  // their actuator. It is computed once in MujocoSystemInterface::on_init() (see
+  // build_joint_actuator_index_map()) instead of being re-derived by an O(joints x actuators)
+  // string comparison on every read()/write() cycle.
+  long int matching_actuator_index_ = -1;
+
   void copy_state_from_transmission()
   {
     position_interface.state_ = position_interface.transmission_passthrough_;

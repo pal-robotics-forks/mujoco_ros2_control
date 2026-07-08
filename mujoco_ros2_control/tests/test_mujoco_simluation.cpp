@@ -207,6 +207,40 @@ TEST_F(MujocoSimulationTest, ControlUpdateTests)
   mj_deleteData(control);
 }
 
+// Guards the selective `copy_physics_state()` snapshot used by the ros2_control read() fast
+// path (see MujocoSystemInterface::read()). Unlike copy_physics_data(), which deep-copies the
+// entire mjData, copy_physics_state() should copy only qpos/qvel/qfrc_actuator/sensordata --
+// but must reproduce those fields exactly, since read() relies on that to compute joint/sensor
+// states. No physics thread is running here, so the comparison is deterministic.
+TEST_F(MujocoSimulationTest, CopyPhysicsStateMatchesFullCopyOfConsumedFields)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  // Give the state some non-trivial, distinguishable values so the two snapshot paths can't
+  // accidentally agree by both defaulting to zero.
+  sim_->data()->qpos[0] = 0.37;
+  sim_->data()->qvel[0] = -0.21;
+  sim_->data()->qfrc_actuator[0] = 1.23;
+
+  mjData* full = nullptr;
+  mjData* fast = nullptr;
+  sim_->copy_physics_data(full);
+  sim_->copy_physics_state(fast);
+  ASSERT_NE(full, nullptr);
+  ASSERT_NE(fast, nullptr);
+
+  EXPECT_DOUBLE_EQ(fast->qpos[0], full->qpos[0]);
+  EXPECT_DOUBLE_EQ(fast->qvel[0], full->qvel[0]);
+  EXPECT_DOUBLE_EQ(fast->qfrc_actuator[0], full->qfrc_actuator[0]);
+  for (int i = 0; i < sim_->model()->nsensordata; ++i)
+  {
+    EXPECT_DOUBLE_EQ(fast->sensordata[i], full->sensordata[i]);
+  }
+
+  mj_deleteData(full);
+  mj_deleteData(fast);
+}
+
 TEST_F(MujocoSimulationTest, XfrcAppliedTests)
 {
   ASSERT_TRUE(initialize_sim());

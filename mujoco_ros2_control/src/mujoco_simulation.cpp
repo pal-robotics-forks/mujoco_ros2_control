@@ -948,6 +948,20 @@ void MujocoSimulation::copy_physics_data(mjData*& destination)
   mj_copyData(destination, mj_model_, mj_data_);
 }
 
+void MujocoSimulation::copy_physics_state(mjData*& destination)
+{
+  if (destination == nullptr)
+  {
+    destination = mj_makeData(mj_model_);
+  }
+
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  mju_copy(destination->qpos, mj_data_->qpos, mj_model_->nq);
+  mju_copy(destination->qvel, mj_data_->qvel, mj_model_->nv);
+  mju_copy(destination->qfrc_actuator, mj_data_->qfrc_actuator, mj_model_->nv);
+  mju_copy(destination->sensordata, mj_data_->sensordata, mj_model_->nsensordata);
+}
+
 void MujocoSimulation::apply_control_data(mjData* control_data)
 {
   const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);

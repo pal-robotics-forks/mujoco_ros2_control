@@ -20,4 +20,11 @@ target_link_libraries(test_headless_init
   hardware_interface::hardware_interface
 )
 
+ament_add_gtest(test_read_write_mapping test_read_write_mapping.cpp)
+target_link_libraries(test_read_write_mapping
+  mujoco_ros2_control
+  rclcpp::rclcpp
+  hardware_interface::hardware_interface
+)
+
 ament_add_pytest_test(test_urdf_to_mujoco_utils test_urdf_to_mujoco_utils.py)
