@@ -168,18 +168,20 @@ protected:
   }
 
   // Exports state interfaces via whichever API this distro provides, always returning shared
-  // pointers so call sites don't need to know which one was used.
-  std::vector<hardware_interface::StateInterface::SharedPtr> export_state_interfaces()
+  // pointers so call sites don't need to know which one was used. Spelled as
+  // std::shared_ptr<StateInterface> rather than StateInterface::SharedPtr: Humble's StateInterface
+  // has no nested SharedPtr typedef at all (it was only added alongside on_export_*() in Jazzy).
+  std::vector<std::shared_ptr<hardware_interface::StateInterface>> export_state_interfaces()
   {
 #if ROS_DISTRO_HUMBLE
-    std::vector<hardware_interface::StateInterface::SharedPtr> interfaces;
+    std::vector<std::shared_ptr<hardware_interface::StateInterface>> interfaces;
     for (auto& state_interface : interface_->export_state_interfaces())
     {
       interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(std::move(state_interface)));
     }
     return interfaces;
 #else
-    std::vector<hardware_interface::StateInterface::SharedPtr> interfaces;
+    std::vector<std::shared_ptr<hardware_interface::StateInterface>> interfaces;
     for (const auto& state_interface : interface_->on_export_state_interfaces())
     {
       interfaces.push_back(std::const_pointer_cast<hardware_interface::StateInterface>(state_interface));

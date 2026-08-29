@@ -179,7 +179,7 @@ private:
   {
     std::string prefix;          ///< joint or sensor name
     std::string interface_name;  ///< exported interface name, e.g. hardware_interface::HW_IF_POSITION
-    double* value;                ///< storage inside urdf_joint_data_ / *_sensor_data_
+    double* value;               ///< storage inside urdf_joint_data_ / *_sensor_data_
   };
 
   /// Enumerates every state interface to export, in export order, from the joint and sensor data
