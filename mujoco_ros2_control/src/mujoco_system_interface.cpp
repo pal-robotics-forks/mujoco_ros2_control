@@ -1409,7 +1409,7 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       actuator_data.vel_pid = std::make_shared<control_toolbox::PidROS>(
           get_node(), "pid_gains.velocity." + actuator_data.joint_name, false);
       actuator_data.vel_pid->initPid();
-      const auto gains = actuator_data.pos_pid->getGains();
+      const auto gains = actuator_data.vel_pid->getGains();
 #else
       actuator_data.vel_pid = std::make_shared<control_toolbox::PidROS>(
           get_node(), "pid_gains.velocity." + actuator_data.joint_name, "", false);
