@@ -191,31 +191,40 @@ private:
   std::vector<InterfaceBinding> collect_command_interface_bindings();
 
 #if !ROS_DISTRO_HUMBLE
-  // Jazzy+ handles own their value; the resource manager only ever sees these shared pointers, so
-  // they must be built once (in on_init) and kept alive here rather than rebuilt per on_export_*
-  // call. Each pairs a handle with the double it mirrors.
-  std::vector<std::pair<hardware_interface::StateInterface::SharedPtr, double*>> state_bindings_;
-  std::vector<std::pair<hardware_interface::CommandInterface::SharedPtr, double*>> command_bindings_;
+  /// A live handle paired with the double it mirrors. Jazzy+ handles own their value; the
+  /// resource manager only ever sees these shared pointers, so they must be built once (in
+  /// on_init) and kept alive here rather than rebuilt per on_export_* call.
+  template <typename InterfaceT>
+  struct HandleBinding
+  {
+    typename InterfaceT::SharedPtr handle;
+    double* value;
+  };
 
-  /// Builds state_bindings_/command_bindings_ from collect_*_interface_bindings(), seeding each
-  /// handle's value from the current double so a read/write before the first read()/write() call
-  /// observes the same value the old pointer-aliasing implementation would have.
+  std::vector<HandleBinding<hardware_interface::StateInterface>> state_bindings_;
+  std::vector<HandleBinding<hardware_interface::CommandInterface>> command_bindings_;
+
+  /// Builds one HandleBinding per InterfaceBinding, seeding each handle's value from the current
+  /// double so a read/write before the first read()/write() call observes the same value the old
+  /// pointer-aliasing implementation would have. Shared by build_interface_handles() for both
+  /// StateInterface and CommandInterface.
+  template <typename InterfaceT>
+  static std::vector<HandleBinding<InterfaceT>> build_bindings(const std::vector<InterfaceBinding>& bindings);
+
+  /// Builds state_bindings_/command_bindings_ from collect_*_interface_bindings().
   void build_interface_handles();
 
-  /// Pushes the current joint/sensor state doubles into their exported StateInterface handles.
-  /// Called at the end of read(), after all sensor and joint state doubles have been refreshed.
-  void push_states_to_interfaces();
+  /// Pushes the current mirrored doubles into their exported handles. wait_for_lock controls
+  /// whether a lock miss blocks (see call sites: the reset path must not silently drop a value,
+  /// the per-cycle read() path can simply retry next cycle).
+  template <typename InterfaceT>
+  static void push_bindings_to_interfaces(const std::vector<HandleBinding<InterfaceT>>& bindings, bool wait_for_lock);
 
   /// Pulls commands from the exported CommandInterface handles into their mirrored doubles.
   /// Called at the top of write(), before mimic joints and actuator command translation consume
-  /// the doubles.
+  /// the doubles. Non-blocking: on a lock miss (or before any controller has claimed the
+  /// interface) the previous command is left in place.
   void pull_commands_from_interfaces();
-
-  /// Pushes the current joint/sensor command doubles into their exported CommandInterface
-  /// handles. Called at the end of reset_simulation_state(), which resets those doubles directly;
-  /// without this push the next pull_commands_from_interfaces() would overwrite the reset values
-  /// with the stale ones still held by the handles.
-  void push_commands_to_interfaces();
 #endif
 
   /**
