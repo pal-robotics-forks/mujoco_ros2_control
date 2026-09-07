@@ -2,6 +2,9 @@
 Changelog for package mujoco_ros2_control_msgs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Forthcoming
+-----------
+
 0.1.1 (2026-08-25)
 ------------------
 
