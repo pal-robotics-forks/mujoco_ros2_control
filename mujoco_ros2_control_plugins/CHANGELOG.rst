@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control_plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.2 (2026-09-07)
+------------------
 * Add world_reset plugin hook and restore eq_active on world reset (`#294 <https://github.com/ros-controls/mujoco_ros2_control/issues/294>`_)
 * Fix plugin parameter namespaces (`#291 <https://github.com/ros-controls/mujoco_ros2_control/issues/291>`_)
 * Contributors: Bilal Gill, Sebastian Castro, Erik Holum
