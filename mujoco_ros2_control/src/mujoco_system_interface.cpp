@@ -470,10 +470,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   set_initial_pose();
 
 #if !ROS_DISTRO_HUMBLE
-  // From Jazzy on, StateInterface/CommandInterface own their value instead of aliasing a
-  // double*, so the handles we hand to the resource manager must be built and kept here, after
-  // the joint/sensor doubles above have their initial values, and before anything (the reset
-  // callback below, or a controller) could observe them.
+  // Build the owned handles now that the joint/sensor doubles have their initial values.
   build_interface_handles();
 #endif
 
@@ -805,9 +802,7 @@ MujocoSystemInterface::build_bindings(const std::vector<InterfaceBinding>& bindi
   for (const auto& binding : bindings)
   {
     auto handle = std::make_shared<InterfaceT>(binding.prefix, binding.interface_name);
-    // Seed from the current value so a read()/write() before the next cycle, or a controller
-    // reading state right after activation, observes the same value the old pointer-aliasing
-    // implementation would.
+    // Seed from the current value so a read/write before the next cycle sees the same value.
     std::ignore = handle->set_value(*binding.value, true);
     handle_bindings.push_back({ std::move(handle), binding.value });
   }
@@ -856,8 +851,7 @@ void MujocoSystemInterface::pull_commands_from_interfaces()
 {
   for (const auto& binding : command_bindings_)
   {
-    // Non-blocking: on a lock miss (or before any controller has claimed the interface), leave
-    // the previous command in place rather than stalling write()'s hot path for the next cycle.
+    // Non-blocking: on a lock miss, leave the previous command in place.
     double command = *binding.value;
     if (binding.handle->get_value(command, false))
     {
@@ -1121,10 +1115,7 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
   }
 
 #if !ROS_DISTRO_HUMBLE
-  // From Jazzy on, the exported StateInterface handles own their value rather than aliasing the
-  // doubles above, so they must be refreshed explicitly now that every sensor/joint state has
-  // been updated. Non-blocking: this runs every cycle, and a missed update is simply retried next
-  // cycle rather than stalling read() on a controller's lock.
+  // Refresh the exported StateInterface handles now that state has been updated.
   push_bindings_to_interfaces(state_bindings_, /*wait_for_lock=*/false);
 #endif
 
@@ -1135,9 +1126,7 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
                                                              const rclcpp::Duration& period)
 {
 #if !ROS_DISTRO_HUMBLE
-  // From Jazzy on, controllers write into the exported CommandInterface handles rather than the
-  // command_ doubles below directly, so those doubles must be refreshed before anything (mimic
-  // joints, transmissions, PID) below reads them.
+  // Refresh command_ doubles from the exported CommandInterface handles before using them below.
   pull_commands_from_interfaces();
 #endif
 
@@ -2323,13 +2312,8 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
   }
 
 #if !ROS_DISTRO_HUMBLE
-  // From Jazzy on, the state_/command_ doubles reset above are no longer the memory backing the
-  // exported handles, so both must be pushed explicitly or a query of the interfaces before the
-  // next read()/write() cycle would see stale pre-reset values. This runs on the physics thread
-  // (via simulation_->set_reset_callback()), not the control-loop thread, so unlike the per-cycle
-  // pushes in read()/write() the command push blocks for the lock: a missed update here would
-  // silently leave a controller's stale pre-reset command in place until it happens to write
-  // again, rather than just being retried next cycle.
+  // Push the reset state_/command_ doubles into their handles; block on the command push since
+  // this runs off the physics thread and a missed update here would stick until the next write.
   push_bindings_to_interfaces(state_bindings_, /*wait_for_lock=*/false);
   push_bindings_to_interfaces(command_bindings_, /*wait_for_lock=*/true);
 #endif

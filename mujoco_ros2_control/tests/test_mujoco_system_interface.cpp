@@ -167,10 +167,8 @@ protected:
 #endif
   }
 
-  // Exports state interfaces via whichever API this distro provides, always returning shared
-  // pointers so call sites don't need to know which one was used. Spelled as
-  // std::shared_ptr<StateInterface> rather than StateInterface::SharedPtr: Humble's StateInterface
-  // has no nested SharedPtr typedef at all (it was only added alongside on_export_*() in Jazzy).
+  // Exports state interfaces via whichever API this distro provides, as shared pointers
+  // (std::shared_ptr, not StateInterface::SharedPtr: that typedef doesn't exist on Humble).
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> export_state_interfaces()
   {
 #if ROS_DISTRO_HUMBLE
@@ -267,11 +265,7 @@ TEST_F(MujocoSystemInterfaceTest, IntVelocityActuatorSupportsVelocityCommandInte
   mj_deleteModel(model);
 }
 
-// Pins the read()-side handle sync introduced when migrating off the pointer-aliasing
-// StateInterface API: from Jazzy on, the exported handles own their value rather than aliasing
-// the joint's state double directly, so read() must push the refreshed doubles into the handles
-// itself. Without that push this test would observe NaN (the handle's un-seeded initial value)
-// instead of the pendulum's actual qpos/qvel.
+// Pins the read()-side handle sync: without it, this would observe NaN instead of qpos/qvel.
 TEST_F(MujocoSystemInterfaceTest, JointStateInterfacesReflectSimulationAfterRead)
 {
   auto hardware_info = create_hardware_info();

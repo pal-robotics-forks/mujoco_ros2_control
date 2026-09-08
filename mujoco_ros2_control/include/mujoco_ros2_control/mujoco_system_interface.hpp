@@ -99,11 +99,8 @@ public:
 #else
   on_init(const hardware_interface::HardwareComponentInterfaceParams& params) override;
 #endif
-// On Humble, StateInterface/CommandInterface directly alias a `double*`, and the framework
-// consumes the by-value vector returned here. From Jazzy on, handles own their value instead of
-// pointing at external memory, so we build and keep our own handles (in on_init) and export them
-// through the newer on_export_*() hooks; read()/write() then sync those handles against the
-// double storage below.
+// Jazzy+ handles own their value instead of aliasing a double*, so we build our own handles
+// and export them via on_export_*(); read()/write() sync those handles against the doubles below.
 #if ROS_DISTRO_HUMBLE
   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
@@ -172,9 +169,7 @@ protected:
   rclcpp::Logger get_logger() const;
 
 private:
-  /// One exported interface: the double it mirrors, and where it comes from. Built once from the
-  /// per-joint/per-sensor data containers, this description is common to both the Humble
-  /// (raw-pointer Handle) and the Jazzy+ (owned-value Handle) export paths.
+  /// One exported interface: the double it mirrors, and where it comes from.
   struct InterfaceBinding
   {
     std::string prefix;          ///< joint or sensor name
@@ -182,18 +177,14 @@ private:
     double* value;               ///< storage inside urdf_joint_data_ / *_sensor_data_
   };
 
-  /// Enumerates every state interface to export, in export order, from the joint and sensor data
-  /// containers. Used directly on Humble; used to build owned StateInterface handles from Jazzy on.
+  /// Enumerates every state interface to export, in export order.
   std::vector<InterfaceBinding> collect_state_interface_bindings();
 
-  /// Enumerates every command interface to export, in export order, from the joint data
-  /// containers. Used directly on Humble; used to build owned CommandInterface handles from Jazzy on.
+  /// Enumerates every command interface to export, in export order.
   std::vector<InterfaceBinding> collect_command_interface_bindings();
 
 #if !ROS_DISTRO_HUMBLE
-  /// A live handle paired with the double it mirrors. Jazzy+ handles own their value; the
-  /// resource manager only ever sees these shared pointers, so they must be built once (in
-  /// on_init) and kept alive here rather than rebuilt per on_export_* call.
+  /// A live handle paired with the double it mirrors; built once in on_init and kept alive here.
   template <typename InterfaceT>
   struct HandleBinding
   {
@@ -204,26 +195,18 @@ private:
   std::vector<HandleBinding<hardware_interface::StateInterface>> state_bindings_;
   std::vector<HandleBinding<hardware_interface::CommandInterface>> command_bindings_;
 
-  /// Builds one HandleBinding per InterfaceBinding, seeding each handle's value from the current
-  /// double so a read/write before the first read()/write() call observes the same value the old
-  /// pointer-aliasing implementation would have. Shared by build_interface_handles() for both
-  /// StateInterface and CommandInterface.
+  /// Builds one HandleBinding per InterfaceBinding, seeding each handle from the current double.
   template <typename InterfaceT>
   static std::vector<HandleBinding<InterfaceT>> build_bindings(const std::vector<InterfaceBinding>& bindings);
 
   /// Builds state_bindings_/command_bindings_ from collect_*_interface_bindings().
   void build_interface_handles();
 
-  /// Pushes the current mirrored doubles into their exported handles. wait_for_lock controls
-  /// whether a lock miss blocks (see call sites: the reset path must not silently drop a value,
-  /// the per-cycle read() path can simply retry next cycle).
+  /// Pushes the mirrored doubles into their exported handles; wait_for_lock controls blocking.
   template <typename InterfaceT>
   static void push_bindings_to_interfaces(const std::vector<HandleBinding<InterfaceT>>& bindings, bool wait_for_lock);
 
   /// Pulls commands from the exported CommandInterface handles into their mirrored doubles.
-  /// Called at the top of write(), before mimic joints and actuator command translation consume
-  /// the doubles. Non-blocking: on a lock miss (or before any controller has claimed the
-  /// interface) the previous command is left in place.
   void pull_commands_from_interfaces();
 #endif
 
