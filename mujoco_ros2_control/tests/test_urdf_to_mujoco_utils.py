@@ -37,6 +37,7 @@ from mujoco_ros2_control import (
     get_processed_mujoco_inputs,
     DECOMPOSED_PATH_NAME,
     COMPOSED_PATH_NAME,
+    VISUAL_PATH_NAME,
     write_mujoco_scene,
     add_urdf_free_joint,
     get_xml_from_file,
@@ -51,6 +52,10 @@ from mujoco_ros2_control import (
     extract_mesh_info,
     copy_pre_generated_meshes,
     add_missing_collisions,
+    ensure_default_classes,
+    decompose_threshold,
+    mesh_home,
+    resolve_pregenerated,
 )
 
 
@@ -405,51 +410,105 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
             result_dom = update_obj_assets(dom, tmpdir + "/", mesh_info_dict)
             self.assertIsNotNone(result_dom)
 
-    def test_update_obj_assets_tags_visual_and_collision(self):
-        # A visual-source geom (has contype) and a collision-source geom (no contype)
-        # that reference obj-converted meshes should have their expanded sub-geoms
-        # tagged class="visual" and class="collision" respectively.
+    def _write_decomposed_mjcf(self, tmpdir, name):
+        # Mimic obj2mjcf --decompose --save-mjcf output: meshes carry NO name attribute
+        # (MuJoCo derives the name from the file stem), a visual geom referencing the whole
+        # mesh, and convex collision-piece geoms. Layout: decomposed/<name>/<name>/<name>.xml
+        mesh_dir = os.path.join(tmpdir, "assets", DECOMPOSED_PATH_NAME, name, name)
+        os.makedirs(mesh_dir)
+        with open(os.path.join(mesh_dir, f"{name}.xml"), "w") as f:
+            f.write(
+                "<mujoco><asset>"
+                '<mesh file="{n}.obj"/>'
+                '<mesh file="{n}_collision_0.obj"/>'
+                '<mesh file="{n}_collision_1.obj"/>'
+                "</asset>"
+                "<worldbody><body>"
+                '<geom mesh="{n}" class="visual"/>'
+                '<geom mesh="{n}_collision_0" class="collision"/>'
+                '<geom mesh="{n}_collision_1" class="collision"/>'
+                "</body></worldbody></mujoco>".format(n=name)
+            )
+
+    def test_update_obj_assets_expands_collision_only(self):
+        # A collision-only mesh is decomposed: its (no-contype) geom expands into the
+        # convex pieces; obj2mjcf's nameless piece meshes are all kept (not collapsed to a
+        # single empty name) and its visual sub-geom is not turned into a collision geom.
         with tempfile.TemporaryDirectory() as tmpdir:
-            composed = os.path.join(tmpdir, "assets", COMPOSED_PATH_NAME)
-            os.makedirs(os.path.join(tmpdir, "assets", DECOMPOSED_PATH_NAME))
-            for name in ("vis_mesh", "col_mesh"):
-                mesh_dir = os.path.join(composed, name)
-                os.makedirs(mesh_dir)
-                with open(os.path.join(mesh_dir, f"{name}.xml"), "w") as f:
-                    f.write(
-                        '<mujoco><asset><mesh name="{n}_0" file="{n}.obj"/></asset>'
-                        '<worldbody><body><geom mesh="{n}_0"/></body></worldbody></mujoco>'.format(n=name)
-                    )
+            self._write_decomposed_mjcf(tmpdir, "col_mesh")
             xml_string = (
                 '<?xml version="1.0"?><mujoco><asset>'
-                '<mesh name="vis_mesh" file="vis.obj"/><mesh name="col_mesh" file="col.obj"/>'
+                '<mesh name="col_mesh" file="col.obj"/>'
                 '</asset><worldbody><body name="test">'
-                '<geom type="mesh" contype="0" conaffinity="0" group="1" density="0" '
-                'rgba="1 0 0 1" mesh="vis_mesh" pos="0 0 0" quat="1 0 0 0"/>'
                 '<geom type="mesh" mesh="col_mesh" pos="0 0 0" quat="1 0 0 0"/>'
                 "</body></worldbody></mujoco>"
             )
             dom = minidom.parseString(xml_string)
             mesh_info_dict = {
-                "vis_mesh": {
-                    "is_pre_generated": False,
-                    "filename": "/p/vis.obj",
-                    "scale": "1 1 1",
-                    "color": (1, 0, 0, 1),
-                },
-                "col_mesh": {
-                    "is_pre_generated": False,
-                    "filename": "/p/col.obj",
-                    "scale": "1 1 1",
-                    "color": (1, 1, 1, 1),
-                },
+                "col_mesh": {"scale": "1 1 1", "used_as_visual": False, "used_as_collision": True},
             }
-            result_dom = update_obj_assets(dom, tmpdir + "/", mesh_info_dict)
-            result_xml = result_dom.toxml()
-            self.assertRegex(result_xml, r'<geom[^>]*mesh="vis_mesh_0"[^>]*class="visual"[^>]*>')
-            self.assertRegex(result_xml, r'<geom[^>]*mesh="col_mesh_0"[^>]*class="collision"[^>]*>')
-            # raw import attrs stripped from the expanded visual geom
-            self.assertEqual(result_xml.count("contype"), 0)
+            result_xml = update_obj_assets(dom, tmpdir + "/", mesh_info_dict).toxml()
+            # convex pieces land in their own class (and viewer group) for inspection
+            self.assertRegex(
+                result_xml, r'<geom[^>]*mesh="col_mesh_collision_0"[^>]*class="decomposed_collision"[^>]*>'
+            )
+            # both convex piece mesh assets are present (not skipped as duplicate empty names)
+            self.assertIn("col_mesh_collision_0.obj", result_xml)
+            self.assertIn("col_mesh_collision_1.obj", result_xml)
+            # obj2mjcf's visual sub-geom (whole mesh) is not cloned as a collidable geom
+            self.assertNotRegex(result_xml, r'<geom[^>]*mesh="col_mesh"[^>]*class="(decomposed_)?collision"[^>]*>')
+
+    def test_update_obj_assets_visual_only_untouched(self):
+        # A visual-only mesh (not in the decomposed dir) is a plain reference: its geom
+        # and <mesh> asset are left as-is (no expansion).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "assets", DECOMPOSED_PATH_NAME))
+            xml_string = (
+                '<?xml version="1.0"?><mujoco><asset>'
+                '<mesh name="vis_mesh" file="visual/vis_mesh.stl"/>'
+                '</asset><worldbody><body name="test">'
+                '<geom type="mesh" contype="0" conaffinity="0" group="1" density="0" '
+                'rgba="1 0 0 1" mesh="vis_mesh"/>'
+                "</body></worldbody></mujoco>"
+            )
+            dom = minidom.parseString(xml_string)
+            mesh_info_dict = {
+                "vis_mesh": {"scale": "1 1 1", "used_as_visual": True, "used_as_collision": False},
+            }
+            result_xml = update_obj_assets(dom, tmpdir + "/", mesh_info_dict).toxml()
+            # the single mesh asset and its geom are untouched (still one reference)
+            self.assertRegex(result_xml, r'<mesh name="vis_mesh"')
+            self.assertEqual(result_xml.count('mesh="vis_mesh"'), 1)
+
+    def test_update_obj_assets_shared_keeps_visual_expands_collision(self):
+        # A shared mesh (used by both visual and collision): the whole <mesh> asset and
+        # the visual geom are kept; only the collision (no-contype) geom is expanded.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_decomposed_mjcf(tmpdir, "shared")
+            xml_string = (
+                '<?xml version="1.0"?><mujoco><asset>'
+                '<mesh name="shared" file="decomposed/shared/shared.obj"/>'
+                '</asset><worldbody><body name="test">'
+                '<geom type="mesh" contype="0" conaffinity="0" group="1" density="0" '
+                'rgba="1 0 0 1" mesh="shared" pos="0 0 0" quat="1 0 0 0"/>'
+                '<geom type="mesh" mesh="shared" pos="0 0 0" quat="1 0 0 0"/>'
+                "</body></worldbody></mujoco>"
+            )
+            dom = minidom.parseString(xml_string)
+            mesh_info_dict = {
+                "shared": {"scale": "1 1 1", "used_as_visual": True, "used_as_collision": True},
+            }
+            result_xml = update_obj_assets(dom, tmpdir + "/", mesh_info_dict).toxml()
+            # exactly one mesh resolves to the name "shared" - our kept whole mesh; obj2mjcf's
+            # nameless re-emit (file decomposed/shared/shared/shared.obj) is deduped away
+            self.assertEqual(result_xml.count('name="shared"'), 1)
+            self.assertNotIn("shared/shared/shared.obj", result_xml)
+            # the visual geom is replaced by obj2mjcf's render geom, still referencing the
+            # whole mesh (this is what carries the obj2mjcf material instead of a flat rgba)
+            self.assertRegex(result_xml, r'<geom[^>]*mesh="shared"[^>]*class="visual"[^>]*>')
+            self.assertNotRegex(result_xml, r"<geom[^>]*contype[^>]*>")
+            # the collision geom was expanded into decomposed pieces in their own class
+            self.assertRegex(result_xml, r'<geom[^>]*mesh="shared_collision_0"[^>]*class="decomposed_collision"[^>]*>')
 
     def test_update_non_obj_assets_visual_geom(self):
         # A geom with contype is a MuJoCo-imported <visual>; it is classified as
@@ -529,6 +588,24 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
         result_xml = result_dom.toxml()
         self.assertEqual(result_xml.count('class="visual"'), 1)
         self.assertEqual(result_xml.count('class="collision"'), 0)
+
+    def test_update_non_obj_assets_visual_rgba_from_mesh_info(self):
+        # When a mesh_info_dict is supplied, a plain visual mesh geom gets its rgba from
+        # the URDF color so it renders correctly without obj2mjcf materials.
+        xml_string = """<?xml version="1.0"?>
+<mujoco>
+  <worldbody>
+    <body name="test">
+      <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="vis_mesh"/>
+    </body>
+  </worldbody>
+</mujoco>"""
+        dom = minidom.parseString(xml_string)
+        mesh_info_dict = {"vis_mesh": {"color": (1.0, 0.0, 0.0, 1.0)}}
+        result_dom = update_non_obj_assets(dom, "/tmp/output/", mesh_info_dict)
+        result_xml = result_dom.toxml()
+        self.assertRegex(result_xml, r'<geom[^>]*mesh="vis_mesh"[^>]*class="visual"[^>]*>')
+        assert 'rgba="1.0 0.0 0.0 1.0"' in result_xml
 
     def test_add_mujoco_inputs_both_none(self):
         xml_string = '<?xml version="1.0"?><mujoco><worldbody/></mujoco>'
@@ -1955,6 +2032,9 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
         self.assertEqual(result["model"]["scale"], "1.0 1.0 1.0")
         self.assertEqual(result["model"]["color"], (1.0, 1.0, 1.0, 1.0))
         self.assertFalse(result["model"]["is_pre_generated"])
+        # a visual-only mesh is flagged for visual use, not collision
+        self.assertTrue(result["model"]["used_as_visual"])
+        self.assertFalse(result["model"]["used_as_collision"])
         assert "package://test_package/meshes/model.dae" in updated_xml
 
     def test_extract_mesh_info_with_material_color(self):
@@ -2038,12 +2118,17 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
         assert "collision_model" in result
         self.assertEqual(result["visual_model"]["color"], (1.0, 0.0, 0.0, 1.0))
         self.assertEqual(result["collision_model"]["color"], (1.0, 1.0, 1.0, 1.0))
+        # distinct meshes are flagged for their respective single use
+        self.assertTrue(result["visual_model"]["used_as_visual"])
+        self.assertFalse(result["visual_model"]["used_as_collision"])
+        self.assertTrue(result["collision_model"]["used_as_collision"])
+        self.assertFalse(result["collision_model"]["used_as_visual"])
         assert "package://test_package/meshes/collision_model.stl" in updated_xml
 
     def test_extract_mesh_info_shared_collision_mesh(self):
         # When the collision references the same mesh file as the visual (the
-        # fallback case), they share a single entry - no duplicate asset - and the
-        # visual's material color wins.
+        # fallback case), they share a single entry - one converted source, reused -
+        # flagged for both uses, with the visual's material color winning.
         urdf = """<?xml version="1.0"?>
 <robot name="test_robot">
   <link name="base_link">
@@ -2064,16 +2149,21 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
         self.assertEqual(len(result), 1)
         assert "model" in result
         self.assertEqual(result["model"]["color"], (1.0, 0.0, 0.0, 1.0))
+        # one entry, reused for both visual and collision
+        self.assertTrue(result["model"]["used_as_visual"])
+        self.assertTrue(result["model"]["used_as_collision"])
 
     def test_extract_mesh_info_with_decompose_dict(self):
+        # decomposition applies to collision meshes, so the decompose pregen lookup is
+        # exercised through a <collision> mesh.
         urdf = """<?xml version="1.0"?>
 <robot name="test_robot">
   <link name="base_link">
-    <visual>
+    <collision>
       <geometry>
         <mesh filename="package://test_package/meshes/complex_mesh.stl"/>
       </geometry>
-    </visual>
+    </collision>
   </link>
 </robot>"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2106,11 +2196,11 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
         urdf = """<?xml version="1.0"?>
 <robot name="test_robot">
   <link name="base_link">
-    <visual>
+    <collision>
       <geometry>
         <mesh filename="package://test_package/meshes/complex_mesh.stl"/>
       </geometry>
-    </visual>
+    </collision>
   </link>
 </robot>"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2135,7 +2225,8 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
 
             self.assertEqual(urdf, updated_xml)
 
-    def test_extract_mesh_with_compose_dict(self):
+    def test_extract_mesh_visual_pre_generated(self):
+        # A visual mesh resolves to a plain pre-generated asset in the visual dir.
         urdf = """<?xml version="1.0"?>
 <robot name="test_robot">
   <link name="base_link">
@@ -2147,9 +2238,9 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
   </link>
 </robot>"""
         with tempfile.TemporaryDirectory() as tmpdir:
-            composed_dir = os.path.join(tmpdir, COMPOSED_PATH_NAME, "complex_mesh")
-            os.makedirs(composed_dir)
-            mesh_file = os.path.join(composed_dir, "complex_mesh.obj")
+            visual_dir = os.path.join(tmpdir, VISUAL_PATH_NAME)
+            os.makedirs(visual_dir)
+            mesh_file = os.path.join(visual_dir, "complex_mesh.obj")
             with open(mesh_file, "w") as f:
                 f.write("# OBJ file")
 
@@ -2157,9 +2248,10 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
             self.assertEqual(len(result), 1)
             assert "complex_mesh" in result
             self.assertTrue(result["complex_mesh"]["is_pre_generated"])
+            self.assertTrue(result["complex_mesh"]["used_as_visual"])
             self.assertEqual(result["complex_mesh"]["scale"], "1.0 1.0 1.0")
             self.assertEqual(result["complex_mesh"]["color"], (1.0, 1.0, 1.0, 1.0))
-            self.assertEqual(f"{composed_dir}/complex_mesh.obj", result["complex_mesh"]["filename"])
+            self.assertEqual(f"{visual_dir}/complex_mesh.obj", result["complex_mesh"]["filename"])
 
             # The updated_xml differs from urdf only for the new path
             assert f"{mesh_file}" in updated_xml
@@ -2167,6 +2259,66 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
                 result["complex_mesh"]["filename"], "package://test_package/meshes/complex_mesh.stl"
             )
             self.assertEqual(urdf, reverted_xml)
+
+    def test_extract_mesh_collision_direct_pre_generated(self):
+        # A collision mesh NOT named in a decompose_mesh input is used directly: its
+        # pre-generated asset is the plain composed mesh, not a decomposed one.
+        urdf = """<?xml version="1.0"?>
+<robot name="test_robot">
+  <link name="base_link">
+    <collision>
+      <geometry>
+        <mesh filename="package://test_package/meshes/chunk.stl"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            composed_dir = os.path.join(tmpdir, COMPOSED_PATH_NAME)
+            os.makedirs(composed_dir)
+            mesh_file = os.path.join(composed_dir, "chunk.obj")
+            with open(mesh_file, "w") as f:
+                f.write("# OBJ file")
+
+            # empty decompose_dict -> the collision mesh is used directly (not decomposed)
+            result, updated_xml = extract_mesh_info(urdf, tmpdir, {})
+            self.assertEqual(len(result), 1)
+            assert "chunk" in result
+            self.assertTrue(result["chunk"]["is_pre_generated"])
+            self.assertTrue(result["chunk"]["used_as_collision"])
+            self.assertFalse(result["chunk"]["used_as_visual"])
+            self.assertEqual(f"{composed_dir}/chunk.obj", result["chunk"]["filename"])
+
+    def test_copy_pre_generated_meshes_collision_direct(self):
+        # A collision mesh used directly (not in decompose_dict) is copied as a single
+        # file into the composed dir, not decomposed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "source", COMPOSED_PATH_NAME)
+            output_dir = os.path.join(tmpdir, "output") + "/"
+            os.makedirs(source_dir)
+            mesh_file = os.path.join(source_dir, "chunk.obj")
+            with open(mesh_file, "w") as f:
+                f.write("# DIRECT COLLISION OBJ")
+
+            mesh_info_dict = {
+                "chunk": {
+                    "is_pre_generated": True,
+                    "filename": mesh_file,
+                    "scale": "1.0 1.0 1.0",
+                    "color": (1.0, 1.0, 1.0, 1.0),
+                    "used_as_visual": False,
+                    "used_as_collision": True,
+                }
+            }
+
+            copy_pre_generated_meshes(output_dir, mesh_info_dict, {})
+
+            expected_dst = os.path.join(output_dir, "assets", COMPOSED_PATH_NAME, "chunk.obj")
+            self.assertTrue(os.path.exists(expected_dst))
+            with open(expected_dst) as f:
+                self.assertEqual(f.read(), "# DIRECT COLLISION OBJ")
+            # not decomposed -> no metadata.json written
+            self.assertFalse(os.path.exists(os.path.join(output_dir, "assets", DECOMPOSED_PATH_NAME, "metadata.json")))
 
     def test_copy_pre_generated_meshes_decomposed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2186,6 +2338,8 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
                     "filename": os.path.join(source_dir, "mesh_name", "mesh_name", "mesh_name.obj"),
                     "scale": "1.0 1.0 1.0",
                     "color": (1.0, 1.0, 1.0, 1.0),
+                    "used_as_visual": False,
+                    "used_as_collision": True,
                 }
             }
             decompose_dict = {"mesh_name": "0.05"}
@@ -2231,6 +2385,8 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
                     "filename": os.path.join(source_dir, "mesh_name", "mesh_name", "mesh_name.obj"),
                     "scale": "1.0 1.0 1.0",
                     "color": (1.0, 1.0, 1.0, 1.0),
+                    "used_as_visual": False,
+                    "used_as_collision": True,
                 }
             }
             decompose_dict = {"mesh_name": "0.10"}
@@ -2251,34 +2407,35 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
                 self.assertEqual(updated_data["previous_mesh_name"], 0.05)
                 self.assertEqual(updated_data["mesh_name"], 0.10)
 
-    def test_copy_pre_generated_meshes_composed(self):
+    def test_copy_pre_generated_meshes_visual(self):
+        # A plain visual mesh is copied as a single file into the visual dir.
         with tempfile.TemporaryDirectory() as tmpdir:
-            source_dir = os.path.join(tmpdir, "source")
+            source_dir = os.path.join(tmpdir, "source", VISUAL_PATH_NAME)
             output_dir = os.path.join(tmpdir, "output") + "/"
             os.makedirs(source_dir)
 
-            mesh_source_dir = os.path.join(source_dir, "mesh_name")
-            os.makedirs(mesh_source_dir)
-            mesh_file = os.path.join(mesh_source_dir, "mesh_name.obj")
+            mesh_file = os.path.join(source_dir, "mesh_name.obj")
             with open(mesh_file, "w") as f:
-                f.write("# COMPOSED OBJ content")
+                f.write("# VISUAL OBJ content")
 
             mesh_info_dict = {
                 "mesh_name": {
                     "is_pre_generated": True,
-                    "filename": os.path.join(source_dir, "mesh_name", "mesh_name.obj"),
+                    "filename": mesh_file,
                     "scale": "1.0 1.0 1.0",
                     "color": (1.0, 1.0, 1.0, 1.0),
+                    "used_as_visual": True,
+                    "used_as_collision": False,
                 }
             }
             decompose_dict = {}
 
             copy_pre_generated_meshes(output_dir, mesh_info_dict, decompose_dict)
 
-            expected_dst = os.path.join(output_dir, "assets", COMPOSED_PATH_NAME, "mesh_name", "mesh_name.obj")
+            expected_dst = os.path.join(output_dir, "assets", VISUAL_PATH_NAME, "mesh_name.obj")
             self.assertTrue(os.path.exists(expected_dst))
             with open(expected_dst) as f:
-                self.assertEqual(f.read(), "# COMPOSED OBJ content")
+                self.assertEqual(f.read(), "# VISUAL OBJ content")
 
     def test_copy_pre_generated_meshes_not_pre_generated(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2298,6 +2455,234 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
 
             assets_dir = os.path.join(output_dir, "assets")
             self.assertFalse(os.path.exists(assets_dir))
+
+    def test_extract_mesh_info_identical_collision_collapses(self):
+        # A collision mesh that is a byte-identical copy of the visual mesh collapses
+        # into the visual entry and the URDF is rewritten to share one file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            visual_file = os.path.join(tmpdir, "visual", "part.stl")
+            collision_file = os.path.join(tmpdir, "collision", "part.stl")
+            for path in (visual_file, collision_file):
+                os.makedirs(os.path.dirname(path))
+                with open(path, "wb") as f:
+                    f.write(b"same bytes")
+            urdf = f"""<?xml version="1.0"?>
+<robot name="test_robot">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="{visual_file}"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="{collision_file}"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>"""
+            result, updated_xml = extract_mesh_info(urdf, None, {})
+            self.assertEqual(list(result.keys()), ["part"])
+            self.assertTrue(result["part"]["used_as_visual"])
+            self.assertTrue(result["part"]["used_as_collision"])
+            self.assertEqual(result["part"]["filename"], visual_file)
+            self.assertNotIn(collision_file, updated_xml)
+            self.assertEqual(updated_xml.count(visual_file), 2)
+
+    def test_decompose_threshold_collision_named(self):
+        item = {"used_as_collision": True, "source_stem": "part"}
+        self.assertEqual(decompose_threshold("part", item, {"part": "0.05"}), "0.05")
+
+    def test_decompose_threshold_visual_only(self):
+        # only collision-used meshes decompose, even when named
+        item = {"used_as_visual": True, "used_as_collision": False, "source_stem": "part"}
+        self.assertIsNone(decompose_threshold("part", item, {"part": "0.05"}))
+
+    def test_decompose_threshold_not_named(self):
+        item = {"used_as_collision": True, "source_stem": "part"}
+        self.assertIsNone(decompose_threshold("part", item, {"other": "0.05"}))
+
+    def test_decompose_threshold_by_source_stem(self):
+        # a disambiguated entry (part__1) still matches a decompose input naming its source
+        item = {"used_as_collision": True, "source_stem": "part"}
+        self.assertEqual(decompose_threshold("part__1", item, {"part": "0.02"}), "0.02")
+
+    def test_mesh_home(self):
+        decompose_dict = {"part": "0.05"}
+        decomposed = {"used_as_collision": True, "source_stem": "part"}
+        self.assertEqual(mesh_home("part", decomposed, decompose_dict), DECOMPOSED_PATH_NAME)
+        plain_collision = {"used_as_collision": True, "source_stem": "chunk"}
+        self.assertEqual(mesh_home("chunk", plain_collision, decompose_dict), COMPOSED_PATH_NAME)
+        visual = {"used_as_visual": True, "used_as_collision": False, "source_stem": "part"}
+        self.assertEqual(mesh_home("part", visual, decompose_dict), VISUAL_PATH_NAME)
+
+    def test_resolve_pregenerated_no_asset_dir(self):
+        uri = "package://pkg/meshes/part.stl"
+        mesh_info_dict = {
+            "part": {
+                "is_pre_generated": False,
+                "filename": uri,
+                "scale": "1.0 1.0 1.0",
+                "color": (1.0, 1.0, 1.0, 1.0),
+                "new_filepath": "package:/pkg/meshes/part.stl",
+                "source_stem": "part",
+                "used_as_visual": True,
+                "used_as_collision": False,
+            }
+        }
+        raw_xml = f'<mesh filename="{uri}"/>'
+        self.assertEqual(resolve_pregenerated(mesh_info_dict, raw_xml, None, {}), raw_xml)
+        self.assertFalse(mesh_info_dict["part"]["is_pre_generated"])
+
+    def test_resolve_pregenerated_visual_hit(self):
+        uri = "package://pkg/meshes/part.stl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, VISUAL_PATH_NAME))
+            cached = os.path.join(tmpdir, VISUAL_PATH_NAME, "part.obj")
+            with open(cached, "w") as f:
+                f.write("# OBJ file")
+            mesh_info_dict = {
+                "part": {
+                    "is_pre_generated": False,
+                    "filename": uri,
+                    "scale": "1.0 1.0 1.0",
+                    "color": (1.0, 1.0, 1.0, 1.0),
+                    "new_filepath": "package:/pkg/meshes/part.stl",
+                    "source_stem": "part",
+                    "used_as_visual": True,
+                    "used_as_collision": False,
+                }
+            }
+            raw_xml = resolve_pregenerated(mesh_info_dict, f'<mesh filename="{uri}"/>', tmpdir, {})
+            self.assertTrue(mesh_info_dict["part"]["is_pre_generated"])
+            self.assertEqual(mesh_info_dict["part"]["filename"], cached)
+            self.assertEqual(mesh_info_dict["part"]["new_filepath"], cached)
+            self.assertEqual(raw_xml, f'<mesh filename="{cached}"/>')
+
+    def test_resolve_pregenerated_probes_home_only(self):
+        # a collision-used mesh lives in the composed dir: a cached file in the visual dir
+        # is not a hit for it
+        uri = "package://pkg/meshes/part.stl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, VISUAL_PATH_NAME))
+            with open(os.path.join(tmpdir, VISUAL_PATH_NAME, "part.obj"), "w") as f:
+                f.write("# OBJ file")
+            mesh_info_dict = {
+                "part": {
+                    "is_pre_generated": False,
+                    "filename": uri,
+                    "scale": "1.0 1.0 1.0",
+                    "color": (1.0, 1.0, 1.0, 1.0),
+                    "new_filepath": "package:/pkg/meshes/part.stl",
+                    "source_stem": "part",
+                    "used_as_visual": False,
+                    "used_as_collision": True,
+                }
+            }
+            raw_xml = resolve_pregenerated(mesh_info_dict, f'<mesh filename="{uri}"/>', tmpdir, {})
+            self.assertFalse(mesh_info_dict["part"]["is_pre_generated"])
+            self.assertEqual(raw_xml, f'<mesh filename="{uri}"/>')
+
+    def test_resolve_pregenerated_decomposed_requires_metadata(self):
+        uri = "package://pkg/meshes/part.stl"
+        entry = {
+            "is_pre_generated": False,
+            "filename": uri,
+            "scale": "1.0 1.0 1.0",
+            "color": (1.0, 1.0, 1.0, 1.0),
+            "new_filepath": "package:/pkg/meshes/part.stl",
+            "source_stem": "part",
+            "used_as_visual": False,
+            "used_as_collision": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            decomposed_dir = os.path.join(tmpdir, DECOMPOSED_PATH_NAME, "part", "part")
+            os.makedirs(decomposed_dir)
+            cached = os.path.join(decomposed_dir, "part.obj")
+            with open(cached, "w") as f:
+                f.write("# OBJ file")
+
+            # no metadata record: the cached folder is unverifiable, so no hit
+            mesh_info_dict = {"part": dict(entry)}
+            resolve_pregenerated(mesh_info_dict, f'<mesh filename="{uri}"/>', tmpdir, {"part": "0.05"})
+            self.assertFalse(mesh_info_dict["part"]["is_pre_generated"])
+
+            # matching threshold: hit
+            with open(os.path.join(tmpdir, DECOMPOSED_PATH_NAME, "metadata.json"), "w") as f:
+                json.dump({"part": 0.05}, f)
+            mesh_info_dict = {"part": dict(entry)}
+            raw_xml = resolve_pregenerated(mesh_info_dict, f'<mesh filename="{uri}"/>', tmpdir, {"part": "0.05"})
+            self.assertTrue(mesh_info_dict["part"]["is_pre_generated"])
+            self.assertEqual(mesh_info_dict["part"]["filename"], cached)
+            self.assertEqual(raw_xml, f'<mesh filename="{cached}"/>')
+
+            # different threshold: no hit
+            mesh_info_dict = {"part": dict(entry)}
+            resolve_pregenerated(mesh_info_dict, f'<mesh filename="{uri}"/>', tmpdir, {"part": "0.02"})
+            self.assertFalse(mesh_info_dict["part"]["is_pre_generated"])
+
+    def test_resolve_pregenerated_renamed_entry(self):
+        # a stem-disambiguated entry carries new_filepath in the URDF, and that is what
+        # gets replaced by the cached path
+        renamed_ref = "package:/pkg/other/part__1.stl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, COMPOSED_PATH_NAME))
+            cached = os.path.join(tmpdir, COMPOSED_PATH_NAME, "part__1.obj")
+            with open(cached, "w") as f:
+                f.write("# OBJ file")
+            mesh_info_dict = {
+                "part__1": {
+                    "is_pre_generated": False,
+                    "filename": "package://pkg/other/part.stl",
+                    "scale": "1.0 1.0 1.0",
+                    "color": (1.0, 1.0, 1.0, 1.0),
+                    "new_filepath": renamed_ref,
+                    "source_stem": "part",
+                    "used_as_visual": False,
+                    "used_as_collision": True,
+                }
+            }
+            raw_xml = resolve_pregenerated(mesh_info_dict, f'<mesh filename="{renamed_ref}"/>', tmpdir, {})
+            self.assertTrue(mesh_info_dict["part__1"]["is_pre_generated"])
+            self.assertEqual(raw_xml, f'<mesh filename="{cached}"/>')
+
+    def test_ensure_default_classes_adds_all(self):
+        dom = minidom.parseString("<mujoco><worldbody/></mujoco>")
+        ensure_default_classes(dom)
+        top_defaults = [n for n in dom.documentElement.childNodes if n.nodeName == "default"]
+        self.assertEqual(len(top_defaults), 1)
+        classes = {d.getAttribute("class"): d for d in top_defaults[0].getElementsByTagName("default")}
+        self.assertEqual(set(classes), {"visual", "collision", "decomposed_collision"})
+        visual_geom = classes["visual"].getElementsByTagName("geom")[0]
+        self.assertEqual(visual_geom.getAttribute("contype"), "0")
+        self.assertEqual(visual_geom.getAttribute("conaffinity"), "0")
+        self.assertEqual(visual_geom.getAttribute("group"), "2")
+        self.assertEqual(classes["collision"].getElementsByTagName("geom")[0].getAttribute("group"), "3")
+        self.assertEqual(classes["decomposed_collision"].getElementsByTagName("geom")[0].getAttribute("group"), "4")
+
+    def test_ensure_default_classes_keeps_existing(self):
+        # a user-defined class is left untouched and only the missing ones are added into
+        # the existing top-level <default> block
+        dom = minidom.parseString(
+            '<mujoco><default><default class="visual"><geom group="7"/></default></default><worldbody/></mujoco>'
+        )
+        ensure_default_classes(dom)
+        top_defaults = [n for n in dom.documentElement.childNodes if n.nodeName == "default"]
+        self.assertEqual(len(top_defaults), 1)
+        classes = [d.getAttribute("class") for d in top_defaults[0].getElementsByTagName("default")]
+        self.assertEqual(sorted(classes), ["collision", "decomposed_collision", "visual"])
+        self.assertIn('<default class="visual"><geom group="7"/></default>', dom.toxml())
+
+    def test_ensure_default_classes_noop_when_present(self):
+        xml = (
+            "<mujoco><default>"
+            '<default class="visual"><geom group="2"/></default>'
+            '<default class="collision"><geom group="3"/></default>'
+            '<default class="decomposed_collision"><geom group="4"/></default>'
+            "</default></mujoco>"
+        )
+        dom = minidom.parseString(xml)
+        self.assertEqual(ensure_default_classes(dom).toxml(), minidom.parseString(xml).toxml())
 
 
 if __name__ == "__main__":

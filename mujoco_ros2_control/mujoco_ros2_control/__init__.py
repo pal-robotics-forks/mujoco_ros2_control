@@ -24,6 +24,10 @@ from .urdf_to_mujoco_utils import (
     update_obj_assets,
     update_non_obj_assets,
     add_mujoco_inputs,
+    ensure_default_classes,
+    decompose_threshold,
+    mesh_home,
+    resolve_pregenerated,
     get_processed_mujoco_inputs,
     parse_inputs_xml,
     parse_scene_xml,
@@ -43,6 +47,8 @@ from .urdf_to_mujoco_utils import (
     write_mujoco_scene,
     DECOMPOSED_PATH_NAME,
     COMPOSED_PATH_NAME,
+    VISUAL_PATH_NAME,
+    DEFAULT_DECOMPOSE_THRESHOLD,
 )
 
 __all__ = [
@@ -57,6 +63,10 @@ __all__ = [
     "update_obj_assets",
     "update_non_obj_assets",
     "add_mujoco_inputs",
+    "ensure_default_classes",
+    "decompose_threshold",
+    "mesh_home",
+    "resolve_pregenerated",
     "get_processed_mujoco_inputs",
     "parse_inputs_xml",
     "parse_scene_xml",
@@ -76,4 +86,6 @@ __all__ = [
     "write_mujoco_scene",
     DECOMPOSED_PATH_NAME,
     COMPOSED_PATH_NAME,
+    VISUAL_PATH_NAME,
+    DEFAULT_DECOMPOSE_THRESHOLD,
 ]
