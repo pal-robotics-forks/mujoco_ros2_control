@@ -2317,6 +2317,13 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
   push_bindings_to_interfaces(state_bindings_, /*wait_for_lock=*/false);
   push_bindings_to_interfaces(command_bindings_, /*wait_for_lock=*/true);
 #endif
+
+  // Notify plugins: they own runtime state that the world reset has invalidated.
+  // eq_active has already been restored to MJCF defaults.
+  for (auto& plugin : plugin_instances_)
+  {
+    plugin->on_reset(simulation_->data());
+  }
 }
 
 void MujocoSystemInterface::get_model(mjModel*& dest)
