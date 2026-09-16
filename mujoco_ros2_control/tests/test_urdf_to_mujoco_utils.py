@@ -1493,9 +1493,7 @@ class TestUrdfToMjcfUtils(unittest.TestCase):
     def test_add_replaced_collisions_defaults_class(self):
         # A geom in the fragment with no class attribute gets class="collision".
         dom = make_single_body_dom("forearm")
-        fragment = make_replace_collision_fragment(
-            '<geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.04"/>'
-        )
+        fragment = make_replace_collision_fragment('<geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.04"/>')
         result_dom = add_replaced_collisions(dom, {"forearm": fragment})
 
         body = result_dom.getElementsByTagName("body")[0]
