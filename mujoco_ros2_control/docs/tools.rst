@@ -151,7 +151,7 @@ Rough outline of the automated conversion process
   - A link named in a ``replace_collision`` input skips all of the above: its collision geometry
     (authored or synthesized) is dropped entirely and never converted, and a user-authored MJCF
     fragment (one or more primitives, optionally grouped under nested sub-bodies) is inserted in
-    its place. See :ref:`replace_collision-attribute`.
+    its place. See the :ref:`replace_collision attribute reference <threshold-attribute>`.
   - Both kinds of geom get explicit attributes written directly onto them, so visual/collision
     separation does not depend on a user-supplied ``<default class="...">`` block:
 
@@ -240,7 +240,7 @@ Main sub-elements
      visual) and replaces it with the given MJCF fragment, copied verbatim into that link's
      ``<body>``. Useful for swapping an expensive collision mesh for cheap primitives (for
      example capsules), including several primitives, or grouping them under nested named
-     sub-bodies. See :ref:`replace_collision-attribute` below.
+     sub-bodies. See the :ref:`replace_collision attribute reference <threshold-attribute>` below.
 
 
 
@@ -391,8 +391,6 @@ attributes the demo converter recognizes; converters may extend this list.
 - Additional attributes: any MJCF attributes you want to set or overwrite (for example ``frictionloss``, ``damping``, ``gravcomp``, ``solimp``, ``solref``, ...).
 - Example: ``<modify_element type="joint" name="joint1" frictionloss="1.0" damping="2.0"/>``.
 - Example: ``<modify_element type="geom" mesh="link1_mesh" class="collision" friction = "0.1 0.005 0.0001"/>``
-
-.. _replace_collision-attribute:
 
 ``replace_collision``
 
