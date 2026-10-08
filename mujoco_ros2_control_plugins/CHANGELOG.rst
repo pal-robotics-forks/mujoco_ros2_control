@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control_plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.3 (2026-10-08)
+------------------
 * Require frame_id to identify sensors in FTS grav comp pluggin (`#315 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/315>`_)
 * Add FTS Gravity Compensation Plugin (`#308 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/308>`_)
 * Contributors: Nathan Dunkelberger, Vedant Randive, Erik Holum, Sebastian Castro, Sai Kishor Kothakota

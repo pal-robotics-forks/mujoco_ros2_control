@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control_tests
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.3 (2026-10-08)
+------------------
 * Apply transmissions consistently in read() and write() (`#313 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/313>`_)
 * Contributors: Daniel Costanzi, Sai Kishor Kothakota
 

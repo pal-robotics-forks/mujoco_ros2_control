@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.3 (2026-10-08)
+------------------
 * Add a way to replace collision meshes upon MJCF conversion (`#310 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/310>`_)
 * Fix constant 1ms physics loop sleep duration affecting high frequency simulations (`#317 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/317>`_)
 * Apply transmissions consistently in read() and write() (`#313 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/313>`_)
