@@ -515,7 +515,7 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseIsApplied)
     return model != nullptr && data != nullptr && data->time > 0.0;
   })) << "Simulation did not start stepping";
 
-  const auto state_interfaces = interface_->export_state_interfaces();
+  const auto state_interfaces = export_state_interfaces();
   ASSERT_EQ(state_interfaces.size(), 6u);
 
   constexpr int kSamples = 2000;
@@ -526,8 +526,8 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseIsApplied)
     interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
     for (int axis = 0; axis < 3; ++axis)
     {
-      const double raw_value = get_value(state_interfaces[axis]);
-      const double noisy_value = get_value(state_interfaces[3 + axis]);
+      const double raw_value = get_value(*state_interfaces[axis]);
+      const double noisy_value = get_value(*state_interfaces[3 + axis]);
       noise_samples.push_back(noisy_value - raw_value);
     }
   }
@@ -559,7 +559,7 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseUsesIndependentRngPerSe
     return model != nullptr && data != nullptr && data->time > 0.0;
   })) << "Simulation did not start stepping";
 
-  const auto state_interfaces = interface_->export_state_interfaces();
+  const auto state_interfaces = export_state_interfaces();
   ASSERT_EQ(state_interfaces.size(), 6u);
 
   bool saw_divergence = false;
@@ -568,7 +568,7 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseUsesIndependentRngPerSe
     interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
     for (int axis = 0; axis < 3; ++axis)
     {
-      if (std::abs(get_value(state_interfaces[axis]) - get_value(state_interfaces[3 + axis])) > 1e-9)
+      if (std::abs(get_value(*state_interfaces[axis]) - get_value(*state_interfaces[3 + axis])) > 1e-9)
       {
         saw_divergence = true;
         break;
@@ -602,7 +602,7 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseSupportsUniformDistribu
     return model != nullptr && data != nullptr && data->time > 0.0;
   })) << "Simulation did not start stepping";
 
-  const auto state_interfaces = interface_->export_state_interfaces();
+  const auto state_interfaces = export_state_interfaces();
   ASSERT_EQ(state_interfaces.size(), 6u);
 
   constexpr int kSamples = 2000;
@@ -613,8 +613,8 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseSupportsUniformDistribu
     interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
     for (int axis = 0; axis < 3; ++axis)
     {
-      const double raw_value = get_value(state_interfaces[axis]);
-      const double uniform_value = get_value(state_interfaces[3 + axis]);
+      const double raw_value = get_value(*state_interfaces[axis]);
+      const double uniform_value = get_value(*state_interfaces[3 + axis]);
       const double sample = uniform_value - raw_value;
       ASSERT_LE(sample, bound + 1e-9) << "Uniform noise must never exceed its scaled bound";
       ASSERT_GE(sample, -bound - 1e-9) << "Uniform noise must never exceed its scaled bound";
