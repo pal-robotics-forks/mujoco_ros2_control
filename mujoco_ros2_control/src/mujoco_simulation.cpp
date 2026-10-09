@@ -729,6 +729,19 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
       refresh_data_snapshot();
       publish_control_state();
     }
+
+    // if there is an id set in the global settings, use that as the initial fixed camera
+    if (mj_model_->vis.global.cameraid >= 0 && mj_model_->vis.global.cameraid < mj_model_->ncam)
+    {
+      sim_->cam.fixedcamid = mj_model_->vis.global.cameraid;
+      sim_->cam.type = mjCAMERA_FIXED;
+    }
+
+    // otherwise use default free camera
+    else
+    {
+      mjv_defaultFreeCamera(mj_model_, &sim_->cam);
+    }
   }
   if (!mj_data_ || !snapshot_write_ || !snapshot_read_)
   {
@@ -1417,7 +1430,7 @@ void MujocoSimulation::physics_loop()
   // run until asked to exit
   while (!sim_->exitrequest.load())
   {
-    // sleep for 1 ms or yield, to let main thread run
+    // sleep for 20% of the timestep (max 1 ms) or yield, to let main thread run
     //  yield results in busy wait - which has better timing but kills battery life
     if (sim_->run && sim_->busywait)
     {
@@ -1425,7 +1438,7 @@ void MujocoSimulation::physics_loop()
     }
     else
     {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(physics_loop_sleep_duration(mj_model_->opt.timestep));
     }
 
     {
