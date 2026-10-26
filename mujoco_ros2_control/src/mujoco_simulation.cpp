@@ -38,6 +38,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include <std_msgs/msg/string.hpp>
 
@@ -261,6 +262,9 @@ static void loadPluginsFromDirectory(const std::string& plugin_dir)
     return;
   }
 
+  // Do not load duplicate libaries
+  static std::unordered_set<std::string> loaded_libraries;
+
   for (const auto& entry : std::filesystem::directory_iterator(plugin_dir, ec))
   {
     if (!entry.is_regular_file(ec))
@@ -271,6 +275,11 @@ static void loadPluginsFromDirectory(const std::string& plugin_dir)
     const auto& path = entry.path();
     if (path.extension() != ".so")
     {
+      continue;
+    }
+    if (!loaded_libraries.insert(path.filename().string()).second)
+    {
+      std::printf("Skipping already loaded library: '%s'\n", path.filename().c_str());
       continue;
     }
 
