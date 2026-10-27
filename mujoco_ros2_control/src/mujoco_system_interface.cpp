@@ -1689,7 +1689,9 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
 
           if (actuator_it->actuator_type == ActuatorType::POSITION || actuator_it->actuator_type == ActuatorType::PLUGIN)
           {
-            RCLCPP_INFO(get_logger(), "Using MuJoCo position actuator for the joint : '%s'", actuator_name.c_str());
+            RCLCPP_INFO(get_logger(), "Using MuJoCo %s actuator for the joint : '%s'",
+                        actuator_it->actuator_type == ActuatorType::PLUGIN ? "plugin (direct ctrl)" : "position",
+                        actuator_name.c_str());
             // Direct position control enabled for position actuator
             actuator_it->is_position_control_enabled = true;
           }
@@ -1730,7 +1732,9 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
               actuator_name.c_str());
           if (actuator_it->actuator_type == ActuatorType::VELOCITY || actuator_it->actuator_type == ActuatorType::PLUGIN)
           {
-            RCLCPP_INFO(get_logger(), "Using MuJoCo velocity actuator for the joint : '%s'", actuator_name.c_str());
+            RCLCPP_INFO(get_logger(), "Using MuJoCo %s actuator for the joint : '%s'",
+                        actuator_it->actuator_type == ActuatorType::PLUGIN ? "plugin (direct ctrl)" : "velocity",
+                        actuator_name.c_str());
             // Direct velocity control enabled for velocity actuator
             actuator_it->is_velocity_control_enabled = true;
           }
@@ -1771,11 +1775,11 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
               "Effort command interface for the joint : %s is not supported with position or velocity actuator."
               "Skipping it.",
               actuator_name.c_str());
-          if (actuator_it->actuator_type == ActuatorType::MOTOR ||
-              actuator_it->actuator_type == ActuatorType::CUSTOM ||
+          if (actuator_it->actuator_type == ActuatorType::MOTOR || actuator_it->actuator_type == ActuatorType::CUSTOM ||
               actuator_it->actuator_type == ActuatorType::PLUGIN)
           {
-            RCLCPP_INFO(get_logger(), "Using MuJoCo motor or custom actuator for the joint : '%s'",
+            RCLCPP_INFO(get_logger(), "Using MuJoCo %s actuator for the joint : '%s'",
+                        actuator_it->actuator_type == ActuatorType::PLUGIN ? "plugin (direct ctrl)" : "motor or custom",
                         actuator_name.c_str());
             // Direct effort control enabled for MOTOR or CUSTOM actuator
             actuator_it->is_effort_control_enabled = true;

@@ -262,7 +262,7 @@ static void loadPluginsFromDirectory(const std::string& plugin_dir)
     return;
   }
 
-  // Do not load duplicate libaries
+  // Prevent loading of duplicate libaraies (with the same filename).
   static std::unordered_set<std::string> loaded_libraries;
 
   for (const auto& entry : std::filesystem::directory_iterator(plugin_dir, ec))
