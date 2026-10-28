@@ -230,24 +230,10 @@
             </default>
           </default>
 
-          <!-- Use the stock MuJoCo PID actuator plugin for the gripper fingers. -->
-          <!-- https://github.com/google-deepmind/mujoco/blob/main/plugin/actuator/README.md -->
-          <extension>
-            <plugin plugin="mujoco.pid">
-              <instance name="finger_pid">
-                <config key="kp" value="1000"/>
-                <config key="ki" value="0"/>
-                <config key="kd" value="60"/>
-                <config key="imax" value="50"/>
-                <config key="slewmax" value="0.05"/>
-              </instance>
-            </plugin>
-          </extension>
-
           <actuator>
             <position name="joint1" joint="joint1" kp="25000" dampratio="1.0" ctrlrange="-3.14159 3.14159" />
             <position name="joint2" joint="joint2" kp="25000" dampratio="1.0" ctrlrange="-3.14159 3.14159" />
-            <plugin tendon="split" name="gripper_left_finger_joint" plugin="mujoco.pid" actdim="1" instance="finger_pid" ctrlrange="-0.09 0.005" forcerange="-50 50" />
+            <position tendon="split" name="gripper_left_finger_joint" kp="1000" dampratio="3.0" ctrlrange="-0.09 0.005" />
           </actuator>
 
           <tendon>
