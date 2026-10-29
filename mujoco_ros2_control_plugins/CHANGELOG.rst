@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control_plugins
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.4 (2026-10-29)
+------------------
 * Add update_read/update_write plugin hooks and fix FTS gravity compensation (`#328 <https://github.com/ros-controls/mujoco_ros2_control/issues/328>`_)
 * Fix typo in plugins on_reset() docs (`#325 <https://github.com/ros-controls/mujoco_ros2_control/issues/325>`_)
 * Contributors: Sai Kishor Kothakota, Sebastian Castro

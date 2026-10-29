@@ -2,8 +2,8 @@
 Changelog for package mujoco_ros2_control
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Forthcoming
------------
+0.1.4 (2026-10-29)
+------------------
 * Add update_read/update_write plugin hooks and fix FTS gravity compensation (`#328 <https://github.com/ros-controls/mujoco_ros2_control/issues/328>`_)
 * Migrate to the new Command/StateInterface API (`#296 <https://github.com/ros-controls/mujoco_ros2_control/issues/296>`_)
 * Do not automatically compute inertia from geoms in URDF-MJCF converter (`#319 <https://github.com/ros-controls/mujoco_ros2_control/issues/319>`_)
