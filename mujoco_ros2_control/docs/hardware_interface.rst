@@ -331,6 +331,12 @@ controller manager rate. Set the ``ros2_control`` ``update_rate`` parameter (Hz)
 the state interfaces are then only refreshed once per ``1/update_rate`` seconds of simulation time, and hold
 their last value (noise included) in between.
 
+This exists because real sensors are often limited by their own sampling rate or communication bandwidth
+(e.g. an IMU or force/torque sensor streaming over a slow bus). When the control loop runs faster than such
+a sensor, the controller keeps seeing the same reading for several cycles. Setting ``update_rate`` to the
+real sensor's rate reproduces this in simulation, so controllers are tested against stale data as they would
+be on hardware.
+
 .. code-block:: xml
 
    <sensor name="imu_sensor">
