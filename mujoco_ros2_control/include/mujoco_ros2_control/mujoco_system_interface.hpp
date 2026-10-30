@@ -64,6 +64,20 @@ constexpr char HW_IF_FORCE[] = "force";
 
 namespace mujoco_ros2_control
 {
+/// ros2_control `<sensor>` parameter key selecting which MuJoCo sensor mapping to build.
+constexpr char MUJOCO_TYPE_PARAM[] = "mujoco_type";
+/// Optional `<sensor>` parameter key overriding the MJCF sensor name; defaults to the sensor's own name.
+constexpr char MUJOCO_SENSOR_NAME_PARAM[] = "mujoco_sensor_name";
+
+/// Force/torque sensor: reads a paired MJCF `force` + `torque` sensor.
+constexpr char MUJOCO_TYPE_FTS[] = "fts";
+/// IMU: reads a paired MJCF `framequat` + `gyro` + `accelerometer` sensor.
+constexpr char MUJOCO_TYPE_IMU[] = "imu";
+/// Site pose: reads a paired MJCF `framepos` + `framequat` sensor.
+constexpr char MUJOCO_TYPE_POSE[] = "pose";
+/// Magnetometer: reads a single MJCF `magnetometer` sensor.
+constexpr char MUJOCO_TYPE_MAGNETOMETER[] = "magnetometer";
+
 class MujocoSystemInterface : public hardware_interface::SystemInterface
 {
 public:
@@ -85,8 +99,15 @@ public:
 #else
   on_init(const hardware_interface::HardwareComponentInterfaceParams& params) override;
 #endif
+// Jazzy+ handles own their value instead of aliasing a double*, so we build our own handles
+// and export them via on_export_*(); read()/write() sync those handles against the doubles below.
+#if ROS_DISTRO_HUMBLE
   std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+#else
+  std::vector<hardware_interface::StateInterface::ConstSharedPtr> on_export_state_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> on_export_command_interfaces() override;
+#endif
 
   hardware_interface::CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
   hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
@@ -148,6 +169,47 @@ protected:
   rclcpp::Logger get_logger() const;
 
 private:
+  /// One exported interface: the double it mirrors, and where it comes from.
+  struct InterfaceBinding
+  {
+    std::string prefix;          ///< joint or sensor name
+    std::string interface_name;  ///< exported interface name, e.g. hardware_interface::HW_IF_POSITION
+    double* value;               ///< storage inside urdf_joint_data_ / *_sensor_data_
+  };
+
+  /// Enumerates every state interface to export, in export order.
+  std::vector<InterfaceBinding> collect_state_interface_bindings();
+
+  /// Enumerates every command interface to export, in export order.
+  std::vector<InterfaceBinding> collect_command_interface_bindings();
+
+#if !ROS_DISTRO_HUMBLE
+  /// A live handle paired with the double it mirrors; built once in on_init and kept alive here.
+  template <typename InterfaceT>
+  struct HandleBinding
+  {
+    typename InterfaceT::SharedPtr handle;
+    double* value;
+  };
+
+  std::vector<HandleBinding<hardware_interface::StateInterface>> state_bindings_;
+  std::vector<HandleBinding<hardware_interface::CommandInterface>> command_bindings_;
+
+  /// Builds one HandleBinding per InterfaceBinding, seeding each handle from the current double.
+  template <typename InterfaceT>
+  static std::vector<HandleBinding<InterfaceT>> build_bindings(const std::vector<InterfaceBinding>& bindings);
+
+  /// Builds state_bindings_/command_bindings_ from collect_*_interface_bindings().
+  void build_interface_handles();
+
+  /// Pushes the mirrored doubles into their exported handles; wait_for_lock controls blocking.
+  template <typename InterfaceT>
+  static void push_bindings_to_interfaces(const std::vector<HandleBinding<InterfaceT>>& bindings, bool wait_for_lock);
+
+  /// Pulls commands from the exported CommandInterface handles into their mirrored doubles.
+  void pull_commands_from_interfaces();
+#endif
+
   /**
    * @brief Loads actuator information from MuJoCo model into the SystemInterface.
    *
@@ -179,7 +241,7 @@ private:
   /**
    * @brief Constructs all sensor data containers for the interface
    *
-   * Pulls sensors (FTS and IMUs) out of the HardwareInfo and uses it to map relevant data containers
+   * Pulls sensors (FTS, IMUs, poses, and magnetometers) out of the HardwareInfo and uses it to map relevant data containers
    * in the ros2_control interface. There are expectations on the naming of sensors in both the MJCF and
    * the ros2_control xacro, as MuJoCo does not have direct support for either of these sensors.
    *
@@ -225,6 +287,17 @@ private:
    *    <state_interface name="linear_acceleration.y"/>
    *    <state_interface name="linear_acceleration.z"/>
    *  </sensor>
+   *
+   * Each underlying MJCF sensor element (`force`, `torque`, `framequat`, `gyro`, `accelerometer`, `framepos`,
+   * `magnetometer`) may set its own `noise` attribute (standard deviation, in the sensor's native units).
+   * MuJoCo compiles this into `mjModel::sensor_noise` but does not apply it itself, so `read()` adds it on
+   * every cycle, using an RNG seeded from `std::random_device` (so noise differs between runs). Setting
+   * `noise="0"` (the MJCF default) keeps a sensor noise-free.
+   *
+   * The noise *magnitude* thus comes entirely from the MJCF; MJCF has no concept of distribution shape
+   * though, so a ros2_control `<param name="noise_distribution">` ("gaussian" (default) or "uniform"),
+   * applying to every field of that sensor, selects it. Uniform noise is drawn from
+   * `[-stddev*sqrt(3), stddev*sqrt(3)]`, so its actual standard deviation still matches the MJCF value.
    */
   void register_sensors(const hardware_interface::HardwareInfo& info);
 
@@ -312,12 +385,14 @@ private:
 
   // Data containers for the HW interface
   std::unordered_map<std::string, hardware_interface::ComponentInfo> joint_hw_info_;
-  std::unordered_map<std::string, hardware_interface::ComponentInfo> sensors_hw_info_;
+  std::unordered_map<std::string, std::vector<hardware_interface::ComponentInfo>> sensors_hw_info_;
 
   // Container for interacting with the underlying physics sim's data.
   // Handed to plugins during `write` and used to stage control inputs.
   // Its full-data refresh is skipped when no plugins are loaded.
   mjData* mj_data_control_{ nullptr };
+  // Scratch data handed to the plugins' update_read() in read(), only allocated with plugins.
+  mjData* mj_data_read_{ nullptr };
 
   // Per-step robot state snapshot used by `read` and `write`.
   MujocoSimulation::ControlState control_state_;
@@ -340,6 +415,7 @@ private:
   std::vector<FTSensorData> ft_sensor_data_;
   std::vector<IMUSensorData> imu_sensor_data_;
   std::vector<SitePoseData> pose_sensor_data_;
+  std::vector<MagnetometerSensorData> magnetometer_sensor_data_;
 
   bool override_mujoco_actuator_positions_{ false };
   bool override_urdf_joint_positions_{ false };

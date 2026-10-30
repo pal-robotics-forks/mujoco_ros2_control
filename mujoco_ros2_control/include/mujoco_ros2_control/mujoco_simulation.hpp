@@ -19,7 +19,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -40,14 +43,38 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <mujoco_ros2_control_msgs/msg/free_joint_state.hpp>
+#include <mujoco_ros2_control_msgs/msg/simulation_state.hpp>
 #include <mujoco_ros2_control_msgs/srv/reset_world.hpp>
 #include <mujoco_ros2_control_msgs/srv/set_free_joint_state.hpp>
 #include <mujoco_ros2_control_msgs/srv/set_pause.hpp>
 #include <mujoco_ros2_control_msgs/srv/step_simulation.hpp>
 #include <mujoco_ros2_control_plugins/mujoco_ros2_control_plugins_base.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 namespace mujoco_ros2_control
 {
+
+namespace
+{
+
+constexpr double kIdleSleepFraction = 0.2;
+
+}  // namespace
+
+/**
+ * @brief Idle sleep used by the physics loop between iterations when not busy-waiting.
+ *
+ * Scales with the model timestep so small timesteps aren't starved by a fixed sleep:
+ * kIdleSleepFraction (20%) of @p timestep, capped at 1 ms.
+ *
+ * @param timestep MuJoCo model timestep (mjModel::opt.timestep) in seconds.
+ * @return Sleep duration in microseconds.
+ */
+inline std::chrono::microseconds physics_loop_sleep_duration(double timestep)
+{
+  return std::min(std::chrono::microseconds(1000),
+                  std::chrono::microseconds(static_cast<int64_t>(std::llround(timestep * kIdleSleepFraction * 1e6))));
+}
 
 /**
  * @brief ROS 2-based container for the mujoco Simulate application.
@@ -82,12 +109,20 @@ namespace mujoco_ros2_control
  *
  * `apply_control_data(...)` will copy control inputs from the provided mjData into staging
  * buffers that the physics loop applies to `mj_data_` immediately before each step.
- * Specifically, it stages `ctrl`, `qfrc_applied`, and `xfrc_applied`. Cartesian forces from
- * `xfrc_applied` compete with inputs from Simulate's drag function, so they are resolved
- * separately. This only takes the control staging mutex and never blocks on physics stepping.
+ * Specifically, it stages `ctrl` and `qfrc_applied`. Both of these values should come from
+ * the interfaces consuming this class. This  This only takes the control staging mutex
+ * and never blocks on physics stepping.
  *
  * `overwrite_physics_data(...)` will completely replace the data for the sim. Should be used
  * with extreme caution.
+ *
+ * `set_pre_step_callback(...)` registers a callback which will be triggered in the Physics
+ * Loop. It will be called immediately before `mj_step()`, providing direct access to
+ * `mj_data_` immediately before progressing the simulation. This gives consumers direct
+ * access to access and modify the data immediately before integration. Users should be
+ * extremely careful with this callback, as it exposes "god like" powers to the simulation
+ * environment and can break, slow down, or otherwise damage the simulation. This should also
+ * be used with caution.
  *
  * Thread safety is still somewhat messy, as callers are provided with a simulation mutex that
  * locks the model and data while the actual mujoco engine moves the sim forward. Callers
@@ -109,6 +144,15 @@ public:
    *        initial state. When false, a keyframe has already been applied.
    */
   using ResetCallback = std::function<void(bool fill_initial_state)>;
+
+  /**
+   * @brief Callback function type the `set_pre_step_callback` hook.
+   *
+   * Called before `mjStep` in the physics loop, use with care.
+   *
+   * @param data The data from the physics simulation, under thread lock.
+   */
+  using PreStepCallback = std::function<void(mjData* data)>;
 
   /**
    * @brief Construct a new Mujoco Simulation object. This is a no-op until initialization.
@@ -148,6 +192,14 @@ public:
   void set_reset_callback(ResetCallback callback);
 
   /**
+   * @brief Register the callback run before every `mj_step()`.
+   *
+   * See the class documentation for more information. Any function called here will hold
+   * the simulation mutex and block the physics loop. Use with care.
+   */
+  void set_pre_step_callback(PreStepCallback callback);
+
+  /**
    * @brief Start the physics thread. Must be called after load_model().
    */
   void start_physics_thread();
@@ -179,6 +231,7 @@ public:
 
   /**
    * @brief Reset simulation state (qpos/qvel/ctrl/sensors/forces) to the captured initial state.
+   *
    * @note Caller must hold the sim mutex.
    */
   void reset_world_state(bool fill_initial_state);
@@ -186,7 +239,7 @@ public:
   /**
    * @brief Sets the pose and velocity of one or more free-joint objects, identified by body name.
    *
-   * Applied atomically: every entry is resolved before anything is written, so a single invalid
+   * Applied atomically: every entry is validated before anything is written, so a single invalid
    * entry leaves the sim state unchanged. Duplicate body names are applied in order, so the last
    * one wins. See `FreeJointState.msg` for per-entry fields.
    *
@@ -271,9 +324,10 @@ public:
    * @brief Stages control fields from `control_data` for the physics loop in a thread safe way.
    *
    * Specifically, copies `control_data->ctrl` and `control_data->qfrc_applied` into staging
-   * buffers which the physics loop copies into `mj_data_` immediately before each step.
-   * `control_data->xfrc_applied` is copied into `xfrc_plugin_desired_` to avoid conflicts
-   * from the simulate app. This does not lock the sim mutex and never waits on stepping.
+   * buffers which the physics loop copies into `mj_data_` immediately before each step. These
+   * are the only two fields staged here because both are "held" quantities that persist
+   * correctly across a batch of steps. Anything else that requires direct access to simulation
+   * data can access it through the `set_pre_step_callback` functions.
    */
   void apply_control_data(mjData* control_data);
 
@@ -337,41 +391,79 @@ private:
   void update_sim_display();
 
   /**
-   * @brief A `FreeJointState` entry fully resolved to world-frame values, ready to write.
-   */
-  struct FreeJointWrite
-  {
-    int qpos_adr{ -1 };
-    int qvel_adr{ -1 };
-    mjtNum world_pos[3];
-    mjtNum world_quat[4];
-    mjtNum world_linvel[3];
-    mjtNum world_angvel[3];
-  };
-
-  /**
-   * @brief Resolves `frame_id` to a body id: empty means the world frame (`body_id = -1`),
-   * otherwise it must name a known MuJoCo body.
+   * @brief Reset simulation state, applying joint state overrides on top of the restored state.
    *
-   * @param field_label Identifies which field ("pose"/"twist") in `error_message` on failure.
-   * @return true if resolved; false otherwise, with `error_message` set.
-   */
-  bool resolve_frame_id(const std::string& frame_id, const std::string& field_label, int& body_id,
-                        std::string& error_message);
-
-  /**
-   * @brief Resolves a `FreeJointState` entry into a `FreeJointWrite`, without touching
-   * `mj_data_`.
-   *
-   * `pose` and `twist` resolve their own `header.frame_id` independently -- they may reference
-   * different bodies, or one may stay in the world frame while the other is relative.
+   * Private because the overrides are assumed to have already been validated (see
+   * `validate_joint_state_overrides` / `validate_free_joint_states`) -- a precondition only
+   * in-class callers can satisfy, since the validators are private too. Applying unvalidated
+   * overrides writes through unresolved (-1) addresses.
    *
    * @note Caller must hold the sim mutex.
-   * @return true if the body, its free joint, and both frame_ids were resolved; false
-   * otherwise, with `error_message` set.
    */
-  bool resolve_free_joint_write(const mujoco_ros2_control_msgs::msg::FreeJointState& state, FreeJointWrite& out,
-                                std::string& error_message);
+  void reset_world_state(bool fill_initial_state, const mujoco_ros2_control_msgs::msg::SimulationState& state_overrides);
+
+  /**
+   * @brief Resolves a `header.frame_id` to the body it names: -1 for the world frame (empty
+   * string) or for an unknown body.
+   *
+   * This is the single definition of the frame_id convention; `validate_frame_id` wraps it to
+   * turn the unknown-body case into an error message.
+   */
+  int frame_body_id(const std::string& frame_id) const;
+
+  /**
+   * @brief Checks that `frame_id` is empty (world frame) or names a known MuJoCo body.
+   *
+   * @param field_label Identifies which field ("pose"/"twist") in `error_message` on failure.
+   * @return true if valid; false otherwise, with `error_message` set.
+   */
+  bool validate_frame_id(const std::string& frame_id, const std::string& field_label, std::string& error_message) const;
+
+  /**
+   * @brief Returns the id of the free joint driving `body_id`, or -1 if there is none.
+   */
+  int find_free_joint_id(int body_id) const;
+
+  /**
+   * @brief Validates a list of `FreeJointState` entries against the model, without touching
+   * `mj_data_`: every entry must name a body driven by a free joint, and both `header.frame_id`s
+   * must be empty (world frame) or name a known body.
+   *
+   * @note Caller must hold the sim mutex.
+   * @return true if every entry is valid; false otherwise, with `error_message` set.
+   */
+  bool validate_free_joint_states(const std::vector<mujoco_ros2_control_msgs::msg::FreeJointState>& free_joints,
+                                  std::string& error_message);
+
+  /**
+   * @brief Writes free-joint states into `mj_data_->qpos`/`qvel`, resolving each entry's `pose`
+   * and `twist` against their own `header.frame_id` -- they may reference different bodies, or
+   * vary between world vs. relative frame to another body.
+   * Does not refresh snapshots or run forward dynamics; the caller is responsible for both.
+   *
+   * @note Caller must hold the sim mutex and have validated `free_joints` first.
+   */
+  void apply_free_joint_states(const std::vector<mujoco_ros2_control_msgs::msg::FreeJointState>& free_joints);
+
+  /**
+   * @brief Validates a `JointState` message against the model, without touching `mj_data_`.
+   *
+   * Every named joint must be a single-DOF (hinge or slide) MuJoCo joint, and `position` /
+   * `velocity` must each be empty or the same length as `name`. `effort` is not supported and
+   * must be empty.
+   *
+   * @note Caller must hold the sim mutex.
+   * @return true if the message is valid; false otherwise, with `error_message` set.
+   */
+  bool validate_joint_state_overrides(const sensor_msgs::msg::JointState& joint_state, std::string& error_message);
+
+  /**
+   * @brief Writes single-DOF joint states into `mj_data_->qpos`/`qvel`.
+   * Does not refresh snapshots or run forward dynamics; the caller is responsible for both.
+   *
+   * @note Caller must hold the sim mutex and have validated `joint_state` first.
+   */
+  void apply_joint_state_overrides(const sensor_msgs::msg::JointState& joint_state);
 
   // Service callbacks
   void reset_world_callback(const std::shared_ptr<mujoco_ros2_control_msgs::srv::ResetWorld::Request> request,
@@ -424,12 +516,6 @@ private:
   // reset ctrl values in mj_data_ are not clobbered by stale staging buffers.
   bool control_inputs_staged_{ false };
 
-  // Buffers to track actively applied Cartesian forces from both the plugins and the Simulate /
-  // viewer-only drag forces.
-  std::vector<mjtNum> xfrc_plugin_desired_;  // Tracks forces from plugins
-  std::vector<mjtNum> xfrc_viewer_capture_;  // Tracks forces from the viewer
-  std::vector<mjtNum> xfrc_last_written_;    // tracks the last value written to xfrc_applied
-
   // Guards only the snapshot pointer swap and snapshot_ready_ flag.
   // Lock order: sim_mutex_ (if needed) is always taken before this one.
   std::mutex data_exchange_mutex_;
@@ -439,7 +525,7 @@ private:
   // demand instead of the batch rate. Starts true so the first refresh happens.
   std::atomic<bool> snapshot_refresh_requested_{ true };
 
-  // Guards the staged control inputs (ctrl_staged_, qfrc_applied_staged_, xfrc_plugin_desired_,
+  // Guards the staged control inputs (ctrl_staged_, qfrc_applied_staged_,
   // control_inputs_staged_). Separate from data_exchange_mutex_ so that staging commands in
   // write() and applying them before each physics step never queue behind a full mjData copy.
   // Critical sections are all small buffer copies.
@@ -471,6 +557,8 @@ private:
   // Threads for rendering physics and the UI simulation
   std::thread physics_thread_;
   std::thread ui_thread_;
+  // Distinguishes a programmatic RenderLoop wakeup from the user closing its window.
+  std::atomic<bool> explicit_shutdown_requested_{ false };
 
   // Primary clock publisher for the world
   std::shared_ptr<rclcpp::Publisher<rosgraph_msgs::msg::Clock>> clock_publisher_;
@@ -515,6 +603,9 @@ private:
 
   // Callback into the HW interface to perform component-side reset bookkeeping.
   ResetCallback reset_callback_;
+
+  // Callback run immediately before every mj_step(), defaults to nothing.
+  PreStepCallback pre_step_callback_{ [](mjData* /*data*/) {} };
 };
 
 }  // namespace mujoco_ros2_control

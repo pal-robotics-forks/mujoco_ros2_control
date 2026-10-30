@@ -285,6 +285,276 @@ ExternalWrench Parameters
            force_arrow_scale: 0.01      # 100 N  → 1 m arrow
            torque_arrow_scale: 0.1      # 10 N·m → 1 m arrow
 
+BaseVelocityPlugin
+~~~~~~~~~~~~~~~~~~
+
+Drives a mobile or floating-base robot from a commanded planar body velocity (``vx``, ``vy``,
+yaw-rate) received on a ``cmd_vel``-style topic, without relying on wheel-ground contact.
+
+Wheel-terrain friction/slip is often unreliable enough to make it a poor foundation for testing
+navigation stacks. This plugin instead requests a hard **kinematic override** of the base body's
+free-joint velocity every cycle: the (optionally clamped) commanded planar velocity is written
+directly into the joint's ``qvel``, bypassing force/mass dynamics entirely for the driven DOFs.
+There is no gain to tune and no convergence delay — the measured body velocity on the driven axes
+is exactly the commanded velocity on the very next simulation step.
+
+.. warning::
+
+   Because the override is kinematic, it outranks MuJoCo's contact solver. **Colliding with a
+   wall or obstacle will not slow the base down** on the driven axes — the commanded velocity is
+   reasserted every cycle regardless of what any contact computed in between. If you need
+   physically realistic collision response while driving the base, this plugin is not the right
+   tool; the trade-off it makes is exact, disturbance-immune velocity tracking in exchange for
+   giving up momentum-conserving contacts on the driven DOFs.
+
+Only the planar degrees of freedom are driven: body-frame linear x/y and yaw-rate (about body z).
+Vertical motion and roll/pitch are left entirely to gravity and contacts, so the base settles onto
+the ground normally.
+
+.. list-table::
+   :widths: 25 75
+   :header-rows: 0
+
+   * - **Topic**
+     - ``cmd_vel`` (``geometry_msgs/msg/Twist``, or ``TwistStamped`` if ``use_stamped_twist`` is
+       set)
+
+Velocity Override Behavior
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each cycle, the commanded body-frame ``vx``/``vy`` is clamped to ``max_linear_velocity`` (preserving
+direction) and rotated into the world frame using the body's current orientation, since a free
+joint's linear ``qvel`` is expressed in the world frame. The commanded yaw-rate is clamped to
+``max_yaw_rate`` and used as-is, since a free joint's rotational ``qvel`` is already expressed in
+the body-local frame. The result is written directly into ``data->qvel`` during ``pre_step()``,
+which runs on the physics thread immediately before every ``mj_step``, which will happen per physics
+step!
+
+A command that hasn't been refreshed within ``cmd_timeout`` seconds is treated as zero (safety
+stop) rather than left to coast on the last commanded velocity.
+
+BaseVelocity Parameters
+^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :widths: 25 15 15 45
+   :header-rows: 1
+
+   * - Parameter
+     - Type
+     - Default
+     - Description
+   * - ``body``
+     - ``string``
+     - *(required)*
+     - MJCF body name of the base. Must carry a ``<freejoint/>`` — ``init()`` fails otherwise,
+       since there is no ``qvel`` to override without one.
+   * - ``cmd_vel_topic``
+     - ``string``
+     - ``cmd_vel``
+     - Command topic name.
+   * - ``use_stamped_twist``
+     - ``bool``
+     - ``false``
+     - Subscribe to ``geometry_msgs/TwistStamped`` instead of ``geometry_msgs/Twist`` (e.g. for
+       Nav2, which publishes stamped twists by default in some configurations). Even when the param
+       is set to ``true``, the header info is internally not used and only the time at which the
+       message received internal to the plugin takes precedence.
+   * - ``max_linear_velocity``
+     - ``double``
+     - ``+inf``
+     - Clamps the commanded planar speed ``sqrt(vx^2+vy^2)`` [m/s]; unset (the default) passes
+       the command through unclamped.
+   * - ``max_yaw_rate``
+     - ``double``
+     - ``+inf``
+     - Clamps the commanded yaw-rate [rad/s]; unset (the default) passes the command through
+       unclamped.
+   * - ``cmd_timeout``
+     - ``double``
+     - ``0.5``
+     - Seconds since the last received command after which it is treated as zero.
+
+.. note::
+
+   ``rclcpp::Node::create_sub_node()`` (used to give this plugin its own topic/service
+   namespace) does not namespace *parameters* -- they're always node-level. So the plugin's own
+   parameters are declared under an explicitly-built ``mujoco_plugins.<instance_name>.`` prefix
+   (matching the plugin's actual instance key in your YAML), rather than relying on the
+   sub-node's namespace the way topics/services do. This mirrors the pattern used by
+   ``CameraPlugin``/``RangefinderLidarPlugin``/``Mujoco3dLidarPlugin``.
+
+**Example configuration**
+
+.. code-block:: yaml
+
+   /**:
+     ros__parameters:
+       mujoco_plugins:
+         base_velocity_plugin:
+           type: "mujoco_ros2_control_plugins/BaseVelocityPlugin"
+           body: base_link
+           cmd_vel_topic: /cmd_vel
+
+**Example: teleop from the command line**
+
+.. code-block:: bash
+
+   ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+     "{linear: {x: 0.5}, angular: {z: 0.2}}" --rate 10
+
+.. note::
+
+   Odometry for the floating base is published independently by ``mujoco_ros2_control`` itself
+   (parameter ``odom_free_joint_name``, default topic ``/simulator/floating_base_state``) — this
+   plugin only drives the base, it does not publish odometry.
+
+FreeJointStatePublisherPlugin
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Publishes the pose and velocity of every MuJoCo free-joint body (loose objects, unattached
+links, etc.) or a user-selected subset to a single topic, in a user-selectable reference
+frame.
+
+.. list-table::
+   :widths: 25 75
+   :header-rows: 0
+
+   * - **Topic**
+     - ``free_joint_states`` (``mujoco_ros2_control_msgs/msg/FreeJointStateArray``), configurable
+       via the ``topic`` parameter
+
+Each published entry uses the same ``FreeJointState`` layout as the ``~/set_free_joint_state``
+service (see :ref:`simulation_topics_and_services`), so a received message's ``free_joints``
+field can be fed straight into a ``SetFreeJointState`` request to reproduce the snapshotted
+state.
+
+Frame semantics
+^^^^^^^^^^^^^^^
+
+When ``frame_id`` is empty (the default), poses and twists are expressed in the **world** frame.
+When it names another MuJoCo body, poses are expressed relative to that body's current world
+pose, and twists are rotated into that body's current world orientation — the reference body's
+own velocity is **not** subtracted, exactly mirroring how ``~/set_free_joint_state`` interprets a
+non-empty ``frame_id``. This means a message published in frame ``X`` can be sent straight back
+to ``~/set_free_joint_state`` with the same ``frame_id`` to recover the identical world-frame
+state.
+
+If ``frame_id`` names an unknown body, the plugin logs an error and falls back to the world frame
+(published entries then carry an empty ``frame_id``, reflecting the frame actually used).
+
+FreeJointStatePublisher Parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :widths: 25 15 15 45
+   :header-rows: 1
+
+   * - Parameter
+     - Type
+     - Default
+     - Description
+   * - ``frame_id``
+     - ``string``
+     - ``""``
+     - Name of the MuJoCo body every published pose/twist is expressed relative to. Empty means
+       the world frame.
+   * - ``body_names``
+     - ``string[]``
+     - ``[]``
+     - Names of the free-joint bodies to publish. Empty means every free-joint body in the model.
+       An unknown or non-free-joint name here fails plugin initialization.
+   * - ``topic``
+     - ``string``
+     - ``free_joint_states``
+     - Output topic name.
+   * - ``publish_rate``
+     - ``double``
+     - ``50.0``
+     - Publish frequency in Hz.
+
+**Example configuration**
+
+.. code-block:: yaml
+
+   /**:
+     ros__parameters:
+       mujoco_plugins:
+         free_joint_state_publisher:
+           type: "mujoco_ros2_control_plugins/FreeJointStatePublisherPlugin"
+           frame_id: ""              # world frame; set to a body name to publish relative poses
+           body_names: []            # empty = all free-joint bodies
+           topic: "free_joint_states"
+           publish_rate: 50.0
+
+**Example: monitoring free-joint bodies**
+
+.. code-block:: bash
+
+   ros2 topic echo /mujoco_ros2_control_node/free_joint_state_publisher/free_joint_states
+
+FtsGravCompPlugin
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Performs gravity compensation for a force torque sensor based on provided parameters.
+
+This is intended to mock hardware configurations that have a way to perform gravity compensation on the force torque sensor data based on the weight and center of gravity of your end effector.
+The compensation runs in ``update_read()``, so the compensated values are what the ``ros2_control`` force torque sensor state interfaces report.
+One example of this is with the `Universal Robots Set Payload <https://www.universal-robots.com/manuals/EN/HTML/SW5_22/Content/prod-usr-man/software/PolyScope/content/BasicProgNodes/commandtab_set_payload_en.htm>`_ command.
+
+FtsGravCompPlugin Parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Note that each force torque sensor lives as a top level parameter underneath the base `mujoco_ros2_control_plugins/FtsGravCompPlugin` plugin.
+That top level parameter should be named the same as what you see in the `mujoco_sensor_name` parameter in the ros2_control tag of your urdf as you might see like `<param name="mujoco_sensor_name">{sensor_name}</param>`.
+If the top level parameter does not correspond to two sensors in the mujoco config named `<sensor_name>_force` and `<sensor_name>_torque`, the plugin will fail to load.
+
+Each force torque sensor name is treated as a namespace for the remainder of the parameters in the table below.
+See the example configuration below for more details.
+
+.. list-table::
+   :widths: 15 15 70
+   :header-rows: 1
+
+   * - Parameter
+     - Type
+     - Description
+   * - ``frame_id``
+     - ``string``
+     - Name of the mujoco site that the center of mass is represented in.
+   * - ``CoG.pos``
+     - ``double[]``
+     - Position in meters w.r.t. the `frame_id` site of the center of gravity.
+       This vector should be size 3 representing x, y, and z.
+   * - ``CoG.mass``
+     - ``double``
+     - Mass to use for gravity compensation in kg.
+
+
+**Example configuration**
+
+.. code-block:: yaml
+
+   /**:
+     ros__parameters:
+       mujoco_plugins:
+         fts_grav_comp_plugin:
+           type: "mujoco_ros2_control_plugins/FtsGravCompPlugin"
+           # name of the sensor to modify. Note that mujoco sensors will look
+           # like 'fts_sensor_force' and 'fts_sensor_torque'
+           fts_sensor:
+             # mujoco site the CoG is represented in
+             frame_id: ft_sensor_site
+             # specifies the center of gravity w.r.t the 'frame_id' parameter
+             CoG:
+               pos:
+                 - 0.1 # x in m
+                 - 0.0 # y in m
+                 - 0.0 # z in m
+               mass: 10.0 # mass in kg
+
+.. _rangefinder_lidar_plugin:
+
 RangefinderLidarPlugin
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -298,12 +568,12 @@ MuJoCo 3D Lidar Plugin
 ~~~~~~~~~~~~~~~~~~~~~~
 
 MuJoCo does not include native lidar support.
-This package implements lidar through a custom MuJoCo sensor extension in ``mujoco_extensions` (``mujoco.plugin.lidar``) that uses
+This package implements lidar through a custom MuJoCo sensor extension in ``mujoco_extensions`` (``mujoco.plugin.lidar``) that uses
 `mj_multiRay <https://mujoco.readthedocs.io/en/stable/APIreference/APIfunctions.html#mj-multiray>`_ to cast rays each simulation step.
 Refer to the extension package for more information about the computation.
 
 The ``Mujoco3dLidarPlugin`` wraps the underlying sensor to convert the raw data to relevant messages and publish them to ROS topics.
-Specicially, the data for 2D (single-row) and 3D (multi-row) will be published as
+Specifically, the data for 2D (single-row) and 3D (multi-row) will be published as
 `LaserScan <https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/LaserScan.msg>`_ or
 `PointCloud2 <https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/PointCloud2.msg>`_ messages respectively.
 
@@ -390,7 +660,13 @@ Create a header that inherits from ``MuJoCoROS2ControlPluginBase``:
    {
    public:
      bool init(rclcpp::Node::SharedPtr node, const mjModel* model, mjData* data) override;
-     void update(const mjModel* model, mjData* data) override;
+
+     // Override whichever of these you need -- all have a no-op default, see
+     // "Plugin Lifecycle" below for how they differ.
+     void update_write(const mjModel* model, mjData* data) override;
+     void pre_step(mjData* data) override;
+     void on_reset(mjData* /*data*/)
+
      void cleanup() override;
 
    private:
@@ -419,9 +695,19 @@ Create a header that inherits from ``MuJoCoROS2ControlPluginBase``:
      return true;
    }
 
-   void MyCustomPlugin::update(const mjModel* model, mjData* data)
+   void MyCustomPlugin::update_write(const mjModel* model, mjData* data)
    {
-     // Called every control loop iteration
+     // Called once per ros2_control write() cycle, on the control thread.
+   }
+
+   void MyCustomPlugin::pre_step(mjData* data)
+   {
+     // Called on the physics thread, immediately before every mj_step.
+   }
+
+   void MyCustomPlugin::on_reset(mjData* /*data*/)
+   {
+     // Called after a world reset (ResetWorld service or UI reset).
    }
 
    void MyCustomPlugin::cleanup()
@@ -429,7 +715,7 @@ Create a header that inherits from ``MuJoCoROS2ControlPluginBase``:
      // Clean up resources
    }
 
-   }  // namespace my_namespace
+   } // namespace my_namespace
 
    PLUGINLIB_EXPORT_CLASS(
      my_namespace::MyCustomPlugin,
@@ -481,12 +767,38 @@ Plugin Lifecycle
 
 1. **Initialization** (``init``): Called once when the plugin is loaded. Use this to read
    parameters and set up publishers, subscribers, and services.
-2. **Update** (``update``): Called every simulation step at the **end of the** ``read`` **loop**,
-   before the controller update and ``write`` loops. Changes to ``mjData`` here are visible to
-   controllers and affect the next simulation step. This runs in a real-time thread — avoid
-   blocking operations.
-3. **Cleanup** (``cleanup``): Called when shutting down. Release any resources acquired in
+2. **Update read** (``update_read``, optional): Called once per ``ros2_control`` ``read()``
+   cycle, on the control thread, before the state is handed to ``ros2_control``. ``data`` holds
+   only the latest control state (``time``, ``qpos``, ``qvel``, ``act``, ``qfrc_actuator``,
+   ``sensordata``, ``ctrl``), all from the same physics step; derived quantities such as
+   ``site_xpos`` are stale, so call ``mj_kinematics()`` on ``data`` if you need them. Plugins run
+   in order, each sees the previous one's changes, and the result is what the state interfaces
+   report. ``FtsGravCompPlugin`` uses this hook.
+3. **Update write** (``update_write``, optional): Called once per ``ros2_control`` ``write()``
+   cycle, on the control thread, right before the commands are sent to the simulation, so it can
+   read and rewrite ``ctrl``/``qfrc_applied``. ``data`` is a recent snapshot, not the live
+   simulation data. Use this for anything that doesn't need to run on exactly one physics step:
+   publishing sensor data, servicing a trigger, etc. Most plugins in this package (``CameraPlugin``, the lidar plugins,
+   ``HeartbeatPublisherPlugin``, ``FreeJointStatePublisherPlugin``) use only this hook.
+   ``update`` is deprecated: it is what ``update_write`` used to be called, and the default
+   ``update_write`` still forwards to it, so existing plugins keep working. Rename the override
+   to ``update_write``.
+4. **Pre-step** (``pre_step``, optional): Called on the physics thread, immediately before every
+   ``mj_step`` -- including multiple times per outer iteration when the loop batches steps to
+   catch up. ``data`` is the live simulation data: read and write it directly, with no separate
+   command buffer, so an untouched entry keeps its last value. Use this for anything that must
+   hold for exactly one physics step, such as ``BaseVelocityPlugin``'s kinematic velocity
+   override. Runs with the simulation mutex held, so blocking here stalls the physics loop and
+   native viewer too.
+5. **On Reset** (``on_reset``, optional): Called when the simulation is "reset", either from
+   the ResetWorld service from the UI. This lets plugins know that the state of the world has
+   been reset and they can take appropriate action.
+6. **Cleanup** (``cleanup``): Called when shutting down. Release any resources acquired in
    ``init``.
+
+All optional hooks default to doing nothing, so implement whichever fits (or both, or neither). See
+``MuJoCoROS2ControlPluginBase``'s class doc comment in ``mujoco_ros2_control_plugins_base.hpp``
+for the authoritative reference.
 
 
 Building

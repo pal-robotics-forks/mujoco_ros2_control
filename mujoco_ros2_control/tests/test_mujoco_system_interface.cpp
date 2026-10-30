@@ -24,6 +24,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <numeric>
+#include <random>
 #include <thread>
 
 #include <hardware_interface/version.h>
@@ -32,16 +34,17 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <mujoco_ros2_control/mujoco_system_interface.hpp>
+#include <mujoco_ros2_control/utils.hpp>
 
 #define ROS_DISTRO_HUMBLE (HARDWARE_INTERFACE_VERSION_MAJOR < 3)
 
 namespace
 {
 
-// Pendulum model with framepos/framequat sensors on a site at the pendulum body origin.
+// Pendulum model with framepos/framequat and magnetometer sensors on a site at the pendulum body origin.
 constexpr const char* kTestModel = R"(<?xml version="1.0"?>
 <mujoco model="test_system_interface">
-  <option timestep="0.002"/>
+  <option timestep="0.002" magnetic="0.1 0.2 0.3"/>
 
   <worldbody>
     <body name="pendulum" pos="0 0 1">
@@ -54,17 +57,89 @@ constexpr const char* kTestModel = R"(<?xml version="1.0"?>
   <sensor>
     <framepos name="pose_sensor_pos" objtype="site" objname="pendulum_site"/>
     <framequat name="pose_sensor_quat" objtype="site" objname="pendulum_site"/>
+    <magnetometer name="magnetometer_sensor" site="pendulum_site"/>
+    <magnetometer name="magnetometer_sensor_noisy" site="pendulum_site" noise="0.05"/>
   </sensor>
+</mujoco>
+)";
+
+constexpr const char* kIntVelocityTestModel = R"(<?xml version="1.0"?>
+<mujoco model="intvelocity_system_interface">
+  <option timestep="0.002"/>
+
+  <worldbody>
+    <body name="wheel" pos="0 0 0">
+      <joint name="wheel_joint" type="hinge" axis="0 1 0"/>
+      <geom type="cylinder" size="0.1 0.02" mass="1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <intvelocity name="wheel_joint" joint="wheel_joint" kp="10" kv="1" ctrlrange="-5 5"
+                 actrange="-100 100"/>
+  </actuator>
 </mujoco>
 )";
 
 // Write to disk for testing
 const std::string kTestModelPath = "/tmp/test_mujoco_system_interface_model.xml";
+const std::string kIntVelocityTestModelPath = "/tmp/test_mujoco_system_interface_intvelocity_model.xml";
 void write_test_model()
 {
   std::ofstream file(kTestModelPath);
   file << kTestModel;
   file.close();
+}
+
+void write_intvelocity_test_model()
+{
+  std::ofstream file(kIntVelocityTestModelPath);
+  file << kIntVelocityTestModel;
+  file.close();
+}
+
+// Builds a ros2_control magnetometer ComponentInfo mapped to `mujoco_sensor_name`, with the standard
+// magnetic_field.{x,y,z} state interfaces. `extra_params` are merged in on top of the required ones
+// (e.g. "noise_distribution").
+hardware_interface::ComponentInfo
+make_magnetometer_sensor(const std::string& name, const std::string& mujoco_sensor_name,
+                         const std::unordered_map<std::string, std::string>& extra_params = {})
+{
+  hardware_interface::ComponentInfo sensor_info;
+  sensor_info.name = name;
+  sensor_info.parameters[mujoco_ros2_control::MUJOCO_TYPE_PARAM] = mujoco_ros2_control::MUJOCO_TYPE_MAGNETOMETER;
+  sensor_info.parameters[mujoco_ros2_control::MUJOCO_SENSOR_NAME_PARAM] = mujoco_sensor_name;
+  for (const auto& [key, value] : extra_params)
+  {
+    sensor_info.parameters[key] = value;
+  }
+  for (const auto* interface_name : { "magnetic_field.x", "magnetic_field.y", "magnetic_field.z" })
+  {
+    hardware_interface::InterfaceInfo interface_info;
+    interface_info.name = interface_name;
+    sensor_info.state_interfaces.push_back(interface_info);
+  }
+  return sensor_info;
+}
+
+struct NoiseStats
+{
+  double mean;
+  double stddev;
+};
+
+// Computes the sample mean and (population) standard deviation of `samples`.
+NoiseStats compute_stats(const std::vector<double>& samples)
+{
+  const double count = static_cast<double>(samples.size());
+  const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / count;
+  double variance = 0.0;
+  for (const double sample : samples)
+  {
+    variance += (sample - mean) * (sample - mean);
+  }
+  variance /= count;
+  return { mean, std::sqrt(variance) };
 }
 
 }  // namespace
@@ -109,6 +184,10 @@ protected:
     {
       std::filesystem::remove(kTestModelPath);
     }
+    if (std::filesystem::exists(kIntVelocityTestModelPath))
+    {
+      std::filesystem::remove(kIntVelocityTestModelPath);
+    }
   }
 
   // Create the hardware info to initialize the interface with, in headless mode.
@@ -136,6 +215,27 @@ protected:
 #endif
   }
 
+  // Exports state interfaces via whichever API this distro provides, as shared pointers
+  // (std::shared_ptr, not StateInterface::SharedPtr: that typedef doesn't exist on Humble).
+  std::vector<std::shared_ptr<hardware_interface::StateInterface>> export_state_interfaces()
+  {
+#if ROS_DISTRO_HUMBLE
+    std::vector<std::shared_ptr<hardware_interface::StateInterface>> interfaces;
+    for (auto& state_interface : interface_->export_state_interfaces())
+    {
+      interfaces.push_back(std::make_shared<hardware_interface::StateInterface>(std::move(state_interface)));
+    }
+    return interfaces;
+#else
+    std::vector<std::shared_ptr<hardware_interface::StateInterface>> interfaces;
+    for (const auto& state_interface : interface_->on_export_state_interfaces())
+    {
+      interfaces.push_back(std::const_pointer_cast<hardware_interface::StateInterface>(state_interface));
+    }
+    return interfaces;
+#endif
+  }
+
   // Helper function to poll a condition until it returns true or the timeout expires.
   bool wait_until(std::function<bool()> condition, std::chrono::milliseconds timeout = std::chrono::seconds(5),
                   std::chrono::milliseconds poll_interval = std::chrono::milliseconds(10))
@@ -150,8 +250,131 @@ protected:
     return condition();
   }
 
+  // Reads a state interface's current value, abstracting the ROS-distro-specific accessor.
+  static double get_value(const hardware_interface::StateInterface& state_interface)
+  {
+#if ROS_DISTRO_HUMBLE
+    return state_interface.get_value();
+#else
+    return state_interface.get_optional().value();
+#endif
+  }
+
   std::shared_ptr<mujoco_ros2_control::MujocoSystemInterface> interface_;
 };
+
+TEST_F(MujocoSystemInterfaceTest, IntVelocityActuatorSupportsVelocityCommandInterface)
+{
+  write_intvelocity_test_model();
+  auto hardware_info = create_hardware_info();
+  hardware_info.hardware_parameters["mujoco_model"] = kIntVelocityTestModelPath;
+
+  hardware_interface::ComponentInfo joint_info;
+  joint_info.name = "wheel_joint";
+
+  hardware_interface::InterfaceInfo command_interface;
+  command_interface.name = hardware_interface::HW_IF_VELOCITY;
+  joint_info.command_interfaces.push_back(command_interface);
+
+  for (const auto* interface_name :
+       { hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY, hardware_interface::HW_IF_EFFORT })
+  {
+    hardware_interface::InterfaceInfo state_interface;
+    state_interface.name = interface_name;
+    joint_info.state_interfaces.push_back(state_interface);
+  }
+  hardware_info.joints.push_back(joint_info);
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  mjModel* model = nullptr;
+  interface_->get_model(model);
+  ASSERT_NE(model, nullptr);
+  const int actuator_id = mj_name2id(model, mjOBJ_ACTUATOR, "wheel_joint");
+  ASSERT_NE(actuator_id, -1);
+  EXPECT_EQ(model->actuator_dyntype[actuator_id], mjDYN_INTEGRATOR);
+
+#if ROS_DISTRO_HUMBLE
+  auto command_interfaces = interface_->export_command_interfaces();
+  auto& exported_command_interface = command_interfaces.front();
+#else
+  auto command_interfaces = interface_->on_export_command_interfaces();
+  auto& exported_command_interface = *command_interfaces.front();
+#endif
+  ASSERT_EQ(command_interfaces.size(), 1u);
+  EXPECT_EQ(exported_command_interface.get_name(), "wheel_joint/velocity");
+
+  constexpr double velocity_command = 2.0;
+#if ROS_DISTRO_HUMBLE
+  exported_command_interface.set_value(velocity_command);
+#else
+  ASSERT_TRUE(exported_command_interface.set_value(velocity_command));
+#endif
+  ASSERT_EQ(interface_->write(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002)),
+            hardware_interface::return_type::OK);
+
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_data(data);
+    return data != nullptr && std::abs(data->ctrl[actuator_id] - velocity_command) < 1e-9;
+  })) << "Velocity command was not written to the intvelocity actuator ctrl input";
+
+  mj_deleteData(data);
+  mj_deleteModel(model);
+}
+
+// Pins the read()-side handle sync: without it, this would observe NaN instead of qpos/qvel.
+TEST_F(MujocoSystemInterfaceTest, JointStateInterfacesReflectSimulationAfterRead)
+{
+  auto hardware_info = create_hardware_info();
+
+  hardware_interface::ComponentInfo joint_info;
+  joint_info.name = "hinge";
+  for (const auto* interface_name : { hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY })
+  {
+    hardware_interface::InterfaceInfo state_interface;
+    state_interface.name = interface_name;
+    joint_info.state_interfaces.push_back(state_interface);
+  }
+  hardware_info.joints.push_back(joint_info);
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  // Wait for the pendulum to swing under gravity so qpos/qvel are non-zero.
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_model(model);
+    interface_->get_data(data);
+    return model != nullptr && data != nullptr && data->time > 0.1;
+  })) << "Simulation did not start stepping";
+
+  interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+
+  const auto state_interfaces = export_state_interfaces();
+  ASSERT_EQ(state_interfaces.size(), 2u);
+  ASSERT_EQ(state_interfaces[0]->get_name(), "hinge/position");
+  ASSERT_EQ(state_interfaces[1]->get_name(), "hinge/velocity");
+
+#if ROS_DISTRO_HUMBLE
+  const double position = state_interfaces[0]->get_value();
+  const double velocity = state_interfaces[1]->get_value();
+#else
+  const double position = state_interfaces[0]->get_optional().value();
+  const double velocity = state_interfaces[1]->get_optional().value();
+#endif
+  ASSERT_TRUE(std::isfinite(position)) << "Exported position state interface was not synced by read()";
+  ASSERT_TRUE(std::isfinite(velocity)) << "Exported velocity state interface was not synced by read()";
+
+  const int joint_id = mj_name2id(model, mjOBJ_JOINT, "hinge");
+  ASSERT_NE(joint_id, -1);
+  const double tol = 1e-9;
+  EXPECT_NEAR(position, data->qpos[model->jnt_qposadr[joint_id]], tol);
+  EXPECT_NEAR(velocity, data->qvel[model->jnt_dofadr[joint_id]], tol);
+
+  mj_deleteData(data);
+  mj_deleteModel(model);
+}
 
 TEST_F(MujocoSystemInterfaceTest, PoseSensorStateInterfacesRead)
 {
@@ -159,7 +382,7 @@ TEST_F(MujocoSystemInterfaceTest, PoseSensorStateInterfacesRead)
   auto hardware_info = create_hardware_info();
   hardware_interface::ComponentInfo sensor_info;
   sensor_info.name = "pose_sensor";
-  sensor_info.parameters["mujoco_type"] = "pose";
+  sensor_info.parameters[mujoco_ros2_control::MUJOCO_TYPE_PARAM] = mujoco_ros2_control::MUJOCO_TYPE_POSE;
   for (const auto* interface_name :
        { "position.x", "position.y", "position.z", "orientation.x", "orientation.y", "orientation.z", "orientation.w" })
   {
@@ -186,28 +409,28 @@ TEST_F(MujocoSystemInterfaceTest, PoseSensorStateInterfacesRead)
 
   // The pose sensor is the only component registered, so its interfaces are exported
   // in registration order: position.x/y/z, orientation.x/y/z/w.
-  const auto state_interfaces = interface_->export_state_interfaces();
+  const auto state_interfaces = export_state_interfaces();
   ASSERT_EQ(state_interfaces.size(), 7u);
-  ASSERT_EQ(state_interfaces[0].get_name(), "pose_sensor/position.x");
-  ASSERT_EQ(state_interfaces[1].get_name(), "pose_sensor/position.y");
-  ASSERT_EQ(state_interfaces[2].get_name(), "pose_sensor/position.z");
-  ASSERT_EQ(state_interfaces[3].get_name(), "pose_sensor/orientation.x");
-  ASSERT_EQ(state_interfaces[4].get_name(), "pose_sensor/orientation.y");
-  ASSERT_EQ(state_interfaces[5].get_name(), "pose_sensor/orientation.z");
-  ASSERT_EQ(state_interfaces[6].get_name(), "pose_sensor/orientation.w");
+  ASSERT_EQ(state_interfaces[0]->get_name(), "pose_sensor/position.x");
+  ASSERT_EQ(state_interfaces[1]->get_name(), "pose_sensor/position.y");
+  ASSERT_EQ(state_interfaces[2]->get_name(), "pose_sensor/position.z");
+  ASSERT_EQ(state_interfaces[3]->get_name(), "pose_sensor/orientation.x");
+  ASSERT_EQ(state_interfaces[4]->get_name(), "pose_sensor/orientation.y");
+  ASSERT_EQ(state_interfaces[5]->get_name(), "pose_sensor/orientation.z");
+  ASSERT_EQ(state_interfaces[6]->get_name(), "pose_sensor/orientation.w");
 
 #if ROS_DISTRO_HUMBLE
-  const double position_z = state_interfaces[2].get_value();
-  const double qx = state_interfaces[3].get_value();
-  const double qy = state_interfaces[4].get_value();
-  const double qz = state_interfaces[5].get_value();
-  const double qw = state_interfaces[6].get_value();
+  const double position_z = state_interfaces[2]->get_value();
+  const double qx = state_interfaces[3]->get_value();
+  const double qy = state_interfaces[4]->get_value();
+  const double qz = state_interfaces[5]->get_value();
+  const double qw = state_interfaces[6]->get_value();
 #else
-  const double position_z = state_interfaces[2].get_optional().value();
-  const double qx = state_interfaces[3].get_optional().value();
-  const double qy = state_interfaces[4].get_optional().value();
-  const double qz = state_interfaces[5].get_optional().value();
-  const double qw = state_interfaces[6].get_optional().value();
+  const double position_z = state_interfaces[2]->get_optional().value();
+  const double qx = state_interfaces[3]->get_optional().value();
+  const double qy = state_interfaces[4]->get_optional().value();
+  const double qz = state_interfaces[5]->get_optional().value();
+  const double qw = state_interfaces[6]->get_optional().value();
 #endif
 
   // The site sits at the pendulum body origin at height 1.0, so the pose should be
@@ -216,6 +439,291 @@ TEST_F(MujocoSystemInterfaceTest, PoseSensorStateInterfacesRead)
   const double quat_norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
   EXPECT_NEAR(quat_norm, 1.0, tol);
   EXPECT_NEAR(position_z, 1.0, tol);
+}
+
+TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorStateInterfacesRead)
+{
+  auto hardware_info = create_hardware_info();
+  hardware_interface::ComponentInfo sensor_info;
+  sensor_info.name = "magnetometer_sensor";
+  sensor_info.parameters[mujoco_ros2_control::MUJOCO_TYPE_PARAM] = mujoco_ros2_control::MUJOCO_TYPE_MAGNETOMETER;
+  for (const auto* interface_name : { "magnetic_field.x", "magnetic_field.y", "magnetic_field.z" })
+  {
+    hardware_interface::InterfaceInfo interface_info;
+    interface_info.name = interface_name;
+    sensor_info.state_interfaces.push_back(interface_info);
+  }
+  hardware_info.sensors.push_back(sensor_info);
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_model(model);
+    interface_->get_data(data);
+    return model != nullptr && data != nullptr && data->time > 0.0;
+  })) << "Simulation did not start stepping";
+
+  interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+
+  const auto state_interfaces = export_state_interfaces();
+  ASSERT_EQ(state_interfaces.size(), 3u);
+  ASSERT_EQ(state_interfaces[0]->get_name(), "magnetometer_sensor/magnetic_field.x");
+  ASSERT_EQ(state_interfaces[1]->get_name(), "magnetometer_sensor/magnetic_field.y");
+  ASSERT_EQ(state_interfaces[2]->get_name(), "magnetometer_sensor/magnetic_field.z");
+
+  const int magnetometer_id = mj_name2id(model, mjOBJ_SENSOR, "magnetometer_sensor");
+  ASSERT_NE(magnetometer_id, -1);
+  const int magnetometer_data_index = model->sensor_adr[magnetometer_id];
+
+#if ROS_DISTRO_HUMBLE
+  const double magnetic_field_x = state_interfaces[0]->get_value();
+  const double magnetic_field_y = state_interfaces[1]->get_value();
+  const double magnetic_field_z = state_interfaces[2]->get_value();
+#else
+  const double magnetic_field_x = state_interfaces[0]->get_optional().value();
+  const double magnetic_field_y = state_interfaces[1]->get_optional().value();
+  const double magnetic_field_z = state_interfaces[2]->get_optional().value();
+#endif
+
+  const double tol = 1e-9;
+  EXPECT_NEAR(magnetic_field_x, data->sensordata[magnetometer_data_index], tol);
+  EXPECT_NEAR(magnetic_field_y, data->sensordata[magnetometer_data_index + 1], tol);
+  EXPECT_NEAR(magnetic_field_z, data->sensordata[magnetometer_data_index + 2], tol);
+}
+
+TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseIsApplied)
+{
+  // Register the underlying MJCF magnetometer twice: once via the plain sensor (no `noise` attribute) as a
+  // noise-free baseline, and once via `magnetometer_sensor_noisy`, which sets noise="0.05" directly in the
+  // MJCF (see kTestModel). Both are read from the exact same control_state_ snapshot within a single read()
+  // call, so every reading's (noisy - raw) delta is a pure noise sample with no risk of racing a stepping sim.
+  constexpr double kNoiseStdDev = 0.05;  // must match magnetometer_sensor_noisy's noise="0.05" in kTestModel
+  auto hardware_info = create_hardware_info();
+  hardware_info.sensors.push_back(make_magnetometer_sensor("magnetometer_sensor_raw", "magnetometer_sensor"));
+  hardware_info.sensors.push_back(
+      make_magnetometer_sensor("magnetometer_sensor_noisy_iface", "magnetometer_sensor_noisy"));
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_model(model);
+    interface_->get_data(data);
+    return model != nullptr && data != nullptr && data->time > 0.0;
+  })) << "Simulation did not start stepping";
+
+  const auto state_interfaces = export_state_interfaces();
+  ASSERT_EQ(state_interfaces.size(), 6u);
+
+  constexpr int kSamples = 2000;
+  std::vector<double> noise_samples;
+  noise_samples.reserve(kSamples * 3);
+  for (int i = 0; i < kSamples; ++i)
+  {
+    interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      const double raw_value = get_value(*state_interfaces[axis]);
+      const double noisy_value = get_value(*state_interfaces[3 + axis]);
+      noise_samples.push_back(noisy_value - raw_value);
+    }
+  }
+
+  const auto stats = compute_stats(noise_samples);
+
+  // Generous bounds: tight enough to catch "noise not applied" (stddev ~ 0) or a badly mis-scaled
+  // implementation, loose enough to avoid flaking on the randomness itself.
+  EXPECT_NEAR(stats.mean, 0.0, 0.01);
+  EXPECT_NEAR(stats.stddev, kNoiseStdDev, kNoiseStdDev * 0.2);
+}
+
+TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseUsesIndependentRngPerSensor)
+{
+  // Two ros2_control sensors both mapped to the same noisy MJCF magnetometer (noise="0.05" in kTestModel,
+  // see magnetometer_sensor_noisy). Each should draw from its own independently-seeded RNG, so their noise
+  // sequences diverge even though the underlying clean signal (and configured noise stddev) is identical.
+  auto hardware_info = create_hardware_info();
+  hardware_info.sensors.push_back(make_magnetometer_sensor("magnetometer_sensor_a", "magnetometer_sensor_noisy"));
+  hardware_info.sensors.push_back(make_magnetometer_sensor("magnetometer_sensor_b", "magnetometer_sensor_noisy"));
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_model(model);
+    interface_->get_data(data);
+    return model != nullptr && data != nullptr && data->time > 0.0;
+  })) << "Simulation did not start stepping";
+
+  const auto state_interfaces = export_state_interfaces();
+  ASSERT_EQ(state_interfaces.size(), 6u);
+
+  bool saw_divergence = false;
+  for (int i = 0; i < 20 && !saw_divergence; ++i)
+  {
+    interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      if (std::abs(get_value(*state_interfaces[axis]) - get_value(*state_interfaces[3 + axis])) > 1e-9)
+      {
+        saw_divergence = true;
+        break;
+      }
+    }
+  }
+
+  EXPECT_TRUE(saw_divergence) << "Two sensors mapped to the same noisy MJCF sensor should not share an RNG "
+                                 "(their noise sequences should diverge)";
+}
+
+TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseSupportsUniformDistribution)
+{
+  // magnetometer_sensor_noisy sets noise="0.05" in the MJCF; pairing it with a `noise_distribution=uniform`
+  // ros2_control sensor here confirms the distribution choice is honored end-to-end (bounded samples with
+  // stddev matching the MJCF value), not just in the add_sensor_noise() unit tests below.
+  constexpr double kNoiseStdDev = 0.05;  // must match magnetometer_sensor_noisy's noise="0.05" in kTestModel
+  const double bound = kNoiseStdDev * std::sqrt(3.0);
+  auto hardware_info = create_hardware_info();
+  hardware_info.sensors.push_back(make_magnetometer_sensor("magnetometer_sensor_raw", "magnetometer_sensor"));
+  hardware_info.sensors.push_back(make_magnetometer_sensor("magnetometer_sensor_uniform", "magnetometer_sensor_noisy",
+                                                           { { "noise_distribution", "uniform" } }));
+
+  ASSERT_EQ(initialize_interface(hardware_info), hardware_interface::CallbackReturn::SUCCESS);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  ASSERT_TRUE(wait_until([&]() {
+    interface_->get_model(model);
+    interface_->get_data(data);
+    return model != nullptr && data != nullptr && data->time > 0.0;
+  })) << "Simulation did not start stepping";
+
+  const auto state_interfaces = export_state_interfaces();
+  ASSERT_EQ(state_interfaces.size(), 6u);
+
+  constexpr int kSamples = 2000;
+  std::vector<double> noise_samples;
+  noise_samples.reserve(kSamples * 3);
+  for (int i = 0; i < kSamples; ++i)
+  {
+    interface_->read(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      const double raw_value = get_value(*state_interfaces[axis]);
+      const double uniform_value = get_value(*state_interfaces[3 + axis]);
+      const double sample = uniform_value - raw_value;
+      ASSERT_LE(sample, bound + 1e-9) << "Uniform noise must never exceed its scaled bound";
+      ASSERT_GE(sample, -bound - 1e-9) << "Uniform noise must never exceed its scaled bound";
+      noise_samples.push_back(sample);
+    }
+  }
+
+  const auto stats = compute_stats(noise_samples);
+
+  // The uniform range is scaled by sqrt(3) so its true stddev should still match the configured MJCF value.
+  EXPECT_NEAR(stats.mean, 0.0, 0.01);
+  EXPECT_NEAR(stats.stddev, kNoiseStdDev, kNoiseStdDev * 0.2);
+}
+
+TEST(GetNoiseDistributionTest, DefaultsToGaussianWhenParamAbsent)
+{
+  hardware_interface::ComponentInfo sensor;
+  EXPECT_EQ(mujoco_ros2_control::get_noise_distribution(sensor), mujoco_ros2_control::NoiseDistribution::kGaussian);
+}
+
+TEST(GetNoiseDistributionTest, ReturnsUniformWhenParamSetToUniform)
+{
+  hardware_interface::ComponentInfo sensor;
+  sensor.parameters["noise_distribution"] = "uniform";
+  EXPECT_EQ(mujoco_ros2_control::get_noise_distribution(sensor), mujoco_ros2_control::NoiseDistribution::kUniform);
+}
+
+TEST(GetNoiseDistributionTest, ReturnsGaussianWhenParamExplicitlySetToGaussian)
+{
+  hardware_interface::ComponentInfo sensor;
+  sensor.parameters["noise_distribution"] = "gaussian";
+  EXPECT_EQ(mujoco_ros2_control::get_noise_distribution(sensor), mujoco_ros2_control::NoiseDistribution::kGaussian);
+}
+
+TEST(AddSensorNoiseTest, GaussianZeroStdDevIsNoOp)
+{
+  std::mt19937 rng(1);
+  Eigen::Vector3d value(1.0, 2.0, 3.0);
+  mujoco_ros2_control::add_sensor_noise(value, 0.0, mujoco_ros2_control::NoiseDistribution::kGaussian, rng);
+  EXPECT_DOUBLE_EQ(value.x(), 1.0);
+  EXPECT_DOUBLE_EQ(value.y(), 2.0);
+  EXPECT_DOUBLE_EQ(value.z(), 3.0);
+}
+
+TEST(AddSensorNoiseTest, GaussianNonZeroStdDevChangesValue)
+{
+  std::mt19937 rng(1);
+  Eigen::Vector3d value(1.0, 2.0, 3.0);
+  mujoco_ros2_control::add_sensor_noise(value, 0.1, mujoco_ros2_control::NoiseDistribution::kGaussian, rng);
+  EXPECT_NE(value.x(), 1.0);
+  EXPECT_NE(value.y(), 2.0);
+  EXPECT_NE(value.z(), 3.0);
+}
+
+TEST(AddSensorNoiseTest, GaussianSameSeedProducesSameNoise)
+{
+  std::mt19937 rng_a(7);
+  std::mt19937 rng_b(7);
+  Eigen::Vector3d value_a(0.0, 0.0, 0.0);
+  Eigen::Vector3d value_b(0.0, 0.0, 0.0);
+  mujoco_ros2_control::add_sensor_noise(value_a, 1.0, mujoco_ros2_control::NoiseDistribution::kGaussian, rng_a);
+  mujoco_ros2_control::add_sensor_noise(value_b, 1.0, mujoco_ros2_control::NoiseDistribution::kGaussian, rng_b);
+  EXPECT_TRUE(value_a.isApprox(value_b));
+}
+
+TEST(AddSensorNoiseTest, GaussianQuaternionRemainsNormalized)
+{
+  std::mt19937 rng(3);
+  Eigen::Quaterniond value(1.0, 0.0, 0.0, 0.0);
+  mujoco_ros2_control::add_sensor_noise(value, 0.2, mujoco_ros2_control::NoiseDistribution::kGaussian, rng);
+  EXPECT_NEAR(value.norm(), 1.0, 1e-9);
+}
+
+TEST(AddSensorNoiseTest, UniformZeroStdDevIsNoOp)
+{
+  std::mt19937 rng(1);
+  Eigen::Vector3d value(1.0, 2.0, 3.0);
+  mujoco_ros2_control::add_sensor_noise(value, 0.0, mujoco_ros2_control::NoiseDistribution::kUniform, rng);
+  EXPECT_DOUBLE_EQ(value.x(), 1.0);
+  EXPECT_DOUBLE_EQ(value.y(), 2.0);
+  EXPECT_DOUBLE_EQ(value.z(), 3.0);
+}
+
+TEST(AddSensorNoiseTest, UniformQuaternionRemainsNormalized)
+{
+  std::mt19937 rng(3);
+  Eigen::Quaterniond value(1.0, 0.0, 0.0, 0.0);
+  mujoco_ros2_control::add_sensor_noise(value, 0.2, mujoco_ros2_control::NoiseDistribution::kUniform, rng);
+  EXPECT_NEAR(value.norm(), 1.0, 1e-9);
+}
+
+TEST(AddSensorNoiseTest, UniformStaysWithinScaledBounds)
+{
+  // Uniform noise is drawn from [-stddev*sqrt(3), stddev*sqrt(3)] so its true stddev matches `stddev`,
+  // unlike Gaussian noise, which has unbounded tails. This also distinguishes it from a mis-wired Gaussian.
+  constexpr double kStdDev = 0.1;
+  const double bound = kStdDev * std::sqrt(3.0);
+  std::mt19937 rng(11);
+  for (int i = 0; i < 5000; ++i)
+  {
+    Eigen::Vector3d value(0.0, 0.0, 0.0);
+    mujoco_ros2_control::add_sensor_noise(value, kStdDev, mujoco_ros2_control::NoiseDistribution::kUniform, rng);
+    ASSERT_LE(value.x(), bound);
+    ASSERT_GE(value.x(), -bound);
+    ASSERT_LE(value.y(), bound);
+    ASSERT_GE(value.y(), -bound);
+    ASSERT_LE(value.z(), bound);
+    ASSERT_GE(value.z(), -bound);
+  }
 }
 
 int main(int argc, char** argv)

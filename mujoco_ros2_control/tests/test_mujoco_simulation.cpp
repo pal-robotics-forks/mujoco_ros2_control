@@ -19,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -30,13 +31,17 @@
 
 #include <mujoco_ros2_control/mujoco_simulation.hpp>
 #include <mujoco_ros2_control_msgs/msg/free_joint_state.hpp>
+#include <mujoco_ros2_control_msgs/srv/reset_world.hpp>
 #include <mujoco_ros2_control_msgs/srv/set_free_joint_state.hpp>
+
+#include "render_loop_exit.hpp"
 
 namespace
 {
 
 // Basic model for executing unit tests: a hinge joint with an actuator, plus two free-floating
-// bodies ("free_object", "free_object_2") for exercising the free-joint state service.
+// bodies ("free_object", "free_object_2") for exercising the free-joint state service, plus an
+// inactive weld equality ("test_weld") for exercising the eq_active restore on world reset.
 //    nu=1, nq=15 (1 hinge + 7 + 7 free joint), nv=13 (1 hinge + 6 + 6 free joint), nbody=4
 //    (world + pendulum + free_object + free_object_2)
 constexpr const char* kTestModel = R"(<?xml version="1.0"?>
@@ -62,6 +67,10 @@ constexpr const char* kTestModel = R"(<?xml version="1.0"?>
     <position name="hinge_pos" joint="hinge" kp="10"/>
   </actuator>
 
+  <equality>
+    <weld name="test_weld" body1="pendulum" body2="free_object" active="false"/>
+  </equality>
+
   <keyframe>
     <key name="home" qpos="0.5 1 0 1 1 0 0 0 2 0 1 1 0 0 0"/>
   </keyframe>
@@ -79,6 +88,45 @@ void write_test_model()
 
 constexpr double TEST_TOLERANCE = 1e-9;
 }  // namespace
+
+TEST(PhysicsLoopSleep, IsTwentyPercentOfTimestepCappedAtOneMillisecond)
+{
+  using mujoco_ros2_control::physics_loop_sleep_duration;
+  using std::chrono::microseconds;
+  EXPECT_EQ(physics_loop_sleep_duration(0.0005), microseconds(100));
+  EXPECT_EQ(physics_loop_sleep_duration(0.002), microseconds(400));
+  EXPECT_EQ(physics_loop_sleep_duration(0.005), microseconds(1000));
+  EXPECT_EQ(physics_loop_sleep_duration(0.01), microseconds(1000));
+}
+
+TEST(RenderLoopExitHandler, RequestsSimulationExitAndShutsOwningContext)
+{
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr);
+  std::atomic<int> exit_request{ 1 };
+  std::atomic<bool> explicit_shutdown_requested{ false };
+
+  ASSERT_TRUE(rclcpp::ok(context));
+  EXPECT_TRUE(mujoco_ros2_control::detail::handle_render_loop_exit(exit_request, explicit_shutdown_requested, context));
+
+  EXPECT_EQ(exit_request.load(), 1);
+  EXPECT_FALSE(rclcpp::ok(context));
+}
+
+TEST(RenderLoopExitHandler, PreservesContextAfterExplicitShutdown)
+{
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr);
+  std::atomic<int> exit_request{ 1 };
+  std::atomic<bool> explicit_shutdown_requested{ true };
+
+  ASSERT_TRUE(rclcpp::ok(context));
+  EXPECT_FALSE(mujoco_ros2_control::detail::handle_render_loop_exit(exit_request, explicit_shutdown_requested, context));
+
+  EXPECT_EQ(exit_request.load(), 1);
+  EXPECT_TRUE(rclcpp::ok(context));
+  context->shutdown("test cleanup");
+}
 
 class MujocoSimulationTest : public ::testing::Test
 {
@@ -228,32 +276,27 @@ TEST_F(MujocoSimulationTest, ControlUpdateTests)
   mj_deleteData(control);
 }
 
-TEST_F(MujocoSimulationTest, XfrcAppliedTests)
+TEST_F(MujocoSimulationTest, PreStepCallbackAppliesXfrcApplied)
 {
   ASSERT_TRUE(initialize_sim());
 
-  // Simulate the read/write cycle in the ros2_control loop, making sure data
-  // is updated where expected
-  mjData* control = nullptr;
-  sim_->copy_physics_data(control);
-  ASSERT_NE(control, nullptr);
-
-  // Zero xfrc_applied (like for plugins), and apply a force
+  // xfrc_applied is not staged through apply_control_data, instead we register a pre-step callback that
+  // writes directly into the live mjData immediately before every mj_step.
   const size_t body_id = 1;
-  mju_zero(control->xfrc_applied, 6 * sim_->model()->nbody);
-  control->xfrc_applied[body_id * 6 + 0] = 1.0;
-  control->xfrc_applied[body_id * 6 + 1] = 2.0;
-  control->xfrc_applied[body_id * 6 + 2] = 3.0;
+  sim_->set_pre_step_callback([body_id](mjData* data) {
+    data->xfrc_applied[body_id * 6 + 0] = 1.0;
+    data->xfrc_applied[body_id * 6 + 1] = 2.0;
+    data->xfrc_applied[body_id * 6 + 2] = 3.0;
+  });
 
-  sim_->apply_control_data(control);
-
-  // xfrc_applied should NOT be in mj_data_ directly, it goes through the triple
-  // plugin buffer and gets composed in the physics loop
+  // The callback has not run yet as it is only invoked from the physics loop.
   EXPECT_DOUBLE_EQ(sim_->data()->xfrc_applied[body_id * 6 + 0], 0.0);
-  EXPECT_DOUBLE_EQ(sim_->data()->xfrc_applied[body_id * 6 + 1], 0.0);
-  EXPECT_DOUBLE_EQ(sim_->data()->xfrc_applied[body_id * 6 + 2], 0.0);
 
-  mj_deleteData(control);
+  sim_->start_physics_thread();
+  EXPECT_TRUE(wait_until([this, body_id]() { return sim_->data()->xfrc_applied[body_id * 6 + 0] == 1.0; }))
+      << "pre_step callback's xfrc_applied write was not applied by the physics loop";
+  EXPECT_DOUBLE_EQ(sim_->data()->xfrc_applied[body_id * 6 + 1], 2.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->xfrc_applied[body_id * 6 + 2], 3.0);
 }
 
 TEST_F(MujocoSimulationTest, PauseStepUnpause)
@@ -382,6 +425,203 @@ TEST_F(MujocoSimulationTest, ResetWorldTest)
   const double time_after_reset = sim_->data()->time;
   ASSERT_TRUE(wait_until([&]() { return sim_->data()->time > time_after_reset; }))
       << "Time should advance after unpausing post-reset";
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldRestoresEqualityConstraintActivation)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  const int eq_id = mj_name2id(sim_->model(), mjOBJ_EQUALITY, "test_weld");
+  ASSERT_NE(eq_id, -1);
+  ASSERT_EQ(sim_->model()->eq_active0[eq_id], 0) << "test_weld must be authored inactive";
+  ASSERT_EQ(sim_->data()->eq_active[eq_id], 0);
+
+  sim_->capture_initial_state();
+
+  // Simulate a plugin activating the constraint at runtime (e.g. a vacuum gripper engaging
+  // a weld); a world reset must restore the activation to the MJCF-authored default.
+  sim_->data()->eq_active[eq_id] = 1;
+  sim_->reset_world_state(true);
+
+  EXPECT_EQ(sim_->data()->eq_active[eq_id], 0)
+      << "eq_active should be restored to its MJCF default (eq_active0) on world reset";
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldJointStateOverrides)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  // Capture a known initial state, then drift away from it.
+  sim_->data()->qpos[0] = 0.0;
+  sim_->data()->qvel[0] = 0.0;
+  sim_->capture_initial_state();
+  sim_->data()->qpos[0] = 0.3;
+  sim_->data()->qvel[0] = 2.0;
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->state_overrides.joint_states.name = { "hinge" };
+  req->state_overrides.joint_states.position = { 0.7 };
+  req->state_overrides.joint_states.velocity = { 0.25 };
+
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  ASSERT_TRUE(resp->success) << resp->message;
+
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[0], 0.7) << "Override should win over the restored initial position";
+  EXPECT_DOUBLE_EQ(sim_->data()->qvel[0], 0.25) << "Override should win over the restored initial velocity";
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldKeyframeAndOverrides)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  mujoco_ros2_control_msgs::msg::FreeJointState free_override;
+  free_override.name = "free_object_2";
+  free_override.pose.pose.position.x = 5.0;
+  free_override.pose.pose.position.y = 6.0;
+  free_override.pose.pose.position.z = 7.0;
+  free_override.pose.pose.orientation.w = 1.0;
+
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->keyframe = "home";  // hinge=0.5, free_object at (1,0,1), free_object_2 at (2,0,1)
+  req->state_overrides.joint_states.name = { "hinge" };
+  req->state_overrides.joint_states.position = { 0.25 };
+  req->state_overrides.free_joints.push_back(free_override);
+
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  ASSERT_TRUE(resp->success) << resp->message;
+
+  // Overridden entries take their override values, everything else keeps the keyframe values.
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[0], 0.25);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[1], 1.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[2], 0.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[3], 1.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[8], 5.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[9], 6.0);
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[10], 7.0);
+  // Unset twist in the free-joint override comes to rest, like set_free_joint_state.
+  for (int i = 7; i < 13; ++i)
+  {
+    EXPECT_DOUBLE_EQ(sim_->data()->qvel[i], 0.0) << "qvel[" << i << "] should be zero";
+  }
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldOverridesResolveFramesAfterReset)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  // Move "free_object" away from its keyframe pose so pre-reset and post-reset frame
+  // resolution give different answers.
+  sim_->data()->qpos[1] = 10.0;
+  mj_forward(sim_->model(), sim_->data());
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  mujoco_ros2_control_msgs::msg::FreeJointState free_override;
+  free_override.name = "free_object_2";
+  free_override.pose.header.frame_id = "free_object";
+  free_override.pose.pose.position.x = 0.5;
+  free_override.pose.pose.orientation.w = 1.0;
+
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->keyframe = "home";  // puts free_object at (1,0,1)
+  req->state_overrides.free_joints.push_back(free_override);
+
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  ASSERT_TRUE(resp->success) << resp->message;
+
+  // Resolved against free_object's post-reset pose (1,0,1), not its pre-reset pose (10,0,1).
+  EXPECT_NEAR(sim_->data()->qpos[8], 1.5, TEST_TOLERANCE);
+  EXPECT_NEAR(sim_->data()->qpos[9], 0.0, TEST_TOLERANCE);
+  EXPECT_NEAR(sim_->data()->qpos[10], 1.0, TEST_TOLERANCE);
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldInvalidOverrides)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  sim_->data()->qpos[0] = 0.0;
+  sim_->capture_initial_state();
+  sim_->data()->qpos[0] = 0.3;
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->state_overrides.joint_states.name = { "hinge", "nonexistent_joint" };
+  req->state_overrides.joint_states.position = { 0.7, 0.1 };
+
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  EXPECT_FALSE(resp->success);
+  EXPECT_FALSE(resp->message.empty());
+  EXPECT_DOUBLE_EQ(sim_->data()->qpos[0], 0.3) << "An invalid override must leave the world un-reset";
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldMalformedOverrides)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  // Mismatched position length.
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->state_overrides.joint_states.name = { "hinge" };
+  req->state_overrides.joint_states.position = { 0.1, 0.2 };
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  EXPECT_FALSE(resp->success);
+  EXPECT_FALSE(resp->message.empty());
+
+  // Effort overrides are not supported.
+  req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->state_overrides.joint_states.name = { "hinge" };
+  req->state_overrides.joint_states.effort = { 1.0 };
+  future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  resp = future.get();
+  EXPECT_FALSE(resp->success);
+  EXPECT_FALSE(resp->message.empty());
+}
+
+TEST_F(MujocoSimulationTest, ResetWorldFreeJointInJointState)
+{
+  ASSERT_TRUE(initialize_sim());
+
+  const std::string ns = std::string(node_->get_fully_qualified_name());
+  auto client = node_->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>(ns + "/reset_world");
+  ASSERT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+
+  auto req = std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>();
+  req->state_overrides.joint_states.name = { "free_object_joint" };
+  req->state_overrides.joint_states.position = { 1.0 };
+
+  auto future = client->async_send_request(req);
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  auto resp = future.get();
+  EXPECT_FALSE(resp->success);
+  EXPECT_NE(resp->message.find("state_overrides.free_joints"), std::string::npos)
+      << "Message should point free joints at the state_overrides.free_joints field, got: " << resp->message;
 }
 
 TEST_F(MujocoSimulationTest, SetFreeJointStateSetsPoseAndVelocity)

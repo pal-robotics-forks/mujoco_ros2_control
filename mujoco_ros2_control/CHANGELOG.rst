@@ -2,6 +2,84 @@
 Changelog for package mujoco_ros2_control
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+0.1.4 (2026-10-29)
+------------------
+* Add update_read/update_write plugin hooks and fix FTS gravity compensation (`#328 <https://github.com/ros-controls/mujoco_ros2_control/issues/328>`_)
+* Migrate to the new Command/StateInterface API (`#296 <https://github.com/ros-controls/mujoco_ros2_control/issues/296>`_)
+* Do not automatically compute inertia from geoms in URDF-MJCF converter (`#319 <https://github.com/ros-controls/mujoco_ros2_control/issues/319>`_)
+* Contributors: Sai Kishor Kothakota, Sebastian Castro
+
+0.1.3 (2026-10-08)
+------------------
+* Add a way to replace collision meshes upon MJCF conversion (`#310 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/310>`_)
+* Fix constant 1ms physics loop sleep duration affecting high frequency simulations (`#317 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/317>`_)
+* Apply transmissions consistently in read() and write() (`#313 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/313>`_)
+* Align to default camera at startup (`#316 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/316>`_)
+* Log noise type and value of each of the sensor components (`#314 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/314>`_)
+* sibling links reuse already-decomposed collision meshes instead of redecomposing (`#268 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/268>`_)
+* Add support for simulating sensor noise (`#307 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/307>`_)
+* sets contype/conaffinity=0 on visual-only geoms and grouping (`#267 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/267>`_)
+* visual-only mesh fallback + visual/collision group split, refactors make_mjcf_from_robot_description.py to reuse the new logic (`#265 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/265>`_)
+* Use collision-tag meshes/info for collision geoms (primitives, STL/DAE/OBJ) (`#264 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/264>`_)
+* Contributors: Nathan Dunkelberger, Sai Kishor Kothakota, Sebastian Castro, Daniel Costanzi
+
+0.1.2 (2026-09-07)
+------------------
+* Add world_reset plugin hook and restore eq_active on world reset (`#294 <https://github.com/ros-controls/mujoco_ros2_control/issues/294>`_)
+* Re-add conditional tinyxml2_vendor dependency (`#293 <https://github.com/ros-controls/mujoco_ros2_control/issues/293>`_)
+* Remove deprecated tinyxml2_vendor dependency (`#286 <https://github.com/ros-controls/mujoco_ros2_control/issues/286>`_)
+* Shut down ROS when the MuJoCo UI closes (`#285 <https://github.com/ros-controls/mujoco_ros2_control/issues/285>`_)
+* Contributors: Bilal Gill, Dylan Gallagher, Erik Holum, Sai Kishor Kothakota
+
+0.1.1 (2026-08-25)
+------------------
+* Fix the generate changelog of 0.1.0 (`#288 <https://github.com/pal-robotics-forks/mujoco_ros2_control/issues/288>`_)
+* Contributors: Sai Kishor Kothakota
+
+0.1.0 (2026-08-18)
+------------------
+* Add a pre-step callback to the simulation (`#282 <https://github.com/ros-controls/mujoco_ros2_control/issues/282>`_)
+* Fix control mode selection (`#281 <https://github.com/ros-controls/mujoco_ros2_control/issues/281>`_)
+* Support intvelocity actuators (`#271 <https://github.com/ros-controls/mujoco_ros2_control/issues/271>`_)
+* Add base twist plugin for commanding the mobile base (`#254 <https://github.com/ros-controls/mujoco_ros2_control/issues/254>`_)
+* Refine reset world overrides functionality (`#263 <https://github.com/ros-controls/mujoco_ros2_control/issues/263>`_)
+* Support joint overrides in reset world service (`#256 <https://github.com/ros-controls/mujoco_ros2_control/issues/256>`_)
+* Support multiple sets of state interfaces from multiple sensor tags with same name (`#258 <https://github.com/ros-controls/mujoco_ros2_control/issues/258>`_)
+* [Fix] Don't overwrite transmission-driven joint states in the direct-copy fallback (`#259 <https://github.com/ros-controls/mujoco_ros2_control/issues/259>`_)
+* [doc] Fix undefined label errors (`#260 <https://github.com/ros-controls/mujoco_ros2_control/issues/260>`_)
+* Add support for Magnetometer sensor (`#257 <https://github.com/ros-controls/mujoco_ros2_control/issues/257>`_)
+* [Feature] modify elements of geom attribute (`#244 <https://github.com/ros-controls/mujoco_ros2_control/issues/244>`_)
+* Add missing dependencies (`#250 <https://github.com/ros-controls/mujoco_ros2_control/issues/250>`_)
+* [CI] Fix dependency declarations for bloom (`#226 <https://github.com/ros-controls/mujoco_ros2_control/issues/226>`_)
+* Fix transmissions integration working with multiple actuators (`#241 <https://github.com/ros-controls/mujoco_ros2_control/issues/241>`_)
+* Add service to set the free joint body state (`#233 <https://github.com/ros-controls/mujoco_ros2_control/issues/233>`_)
+* Fix links in interface docs, use auto label generator like the upstream (`#238 <https://github.com/ros-controls/mujoco_ros2_control/issues/238>`_)
+* Fix state passed into pose sensors (`#231 <https://github.com/ros-controls/mujoco_ros2_control/issues/231>`_)
+* Fix controller manager rate collapse by decoupling control and physics locks (`#224 <https://github.com/ros-controls/mujoco_ros2_control/issues/224>`_)
+* Use updated ament_index_cpp interfaces, re-add rolling (`#229 <https://github.com/ros-controls/mujoco_ros2_control/issues/229>`_)
+* Add a 3-D Lidar Extension (`#205 <https://github.com/ros-controls/mujoco_ros2_control/issues/205>`_)
+* Add support for "site" transmission type (`#154 <https://github.com/ros-controls/mujoco_ros2_control/issues/154>`_)
+* Add support for pose sensors (`#220 <https://github.com/ros-controls/mujoco_ros2_control/issues/220>`_)
+* Fix deprecations in ament_index_cpp (`#145 <https://github.com/ros-controls/mujoco_ros2_control/issues/145>`_)
+* Fix race condition on sim-display overlay text (`#222 <https://github.com/ros-controls/mujoco_ros2_control/issues/222>`_)
+* Display the sim real time factor on the native viewer (`#189 <https://github.com/ros-controls/mujoco_ros2_control/issues/189>`_)
+* Refactor Rangefinder base Lidar as a Plugin (`#214 <https://github.com/ros-controls/mujoco_ros2_control/issues/214>`_)
+* Refactor RGB-D Cameras to a Plugin (`#211 <https://github.com/ros-controls/mujoco_ros2_control/issues/211>`_)
+* Add 'lyrical' to ros_distro matrix in CI workflow (`#213 <https://github.com/ros-controls/mujoco_ros2_control/issues/213>`_)
+* Fix scipy for openblas missing dependency (`#212 <https://github.com/ros-controls/mujoco_ros2_control/issues/212>`_)
+* Isolate flakey functional tests and update pixi (`#204 <https://github.com/ros-controls/mujoco_ros2_control/issues/204>`_)
+* Support/cameras rendering/headless (`#197 <https://github.com/ros-controls/mujoco_ros2_control/issues/197>`_)
+* Fix glfw initialization on headless run (`#200 <https://github.com/ros-controls/mujoco_ros2_control/issues/200>`_)
+* Add changes for mujoco vendor bump (`#202 <https://github.com/ros-controls/mujoco_ros2_control/issues/202>`_)
+* Control and plugin data input cleanup (`#191 <https://github.com/ros-controls/mujoco_ros2_control/issues/191>`_)
+* Migrate documentation to rst format for control.ros.org (`#188 <https://github.com/ros-controls/mujoco_ros2_control/issues/188>`_)
+* Refactor the core mujoco simulation to be in its own container (`#175 <https://github.com/ros-controls/mujoco_ros2_control/issues/175>`_)
+* Handle topic model loading failures with nullptr instead of exit (`#183 <https://github.com/ros-controls/mujoco_ros2_control/issues/183>`_)
+* Improve LiDAR validation in URDF-to-MJCF conversion (`#182 <https://github.com/ros-controls/mujoco_ros2_control/issues/182>`_)
+* Fix Sphinx xref_missing reference (`#186 <https://github.com/ros-controls/mujoco_ros2_control/issues/186>`_)
+* Handle duplicate mesh file names in the conversion tool (`#171 <https://github.com/ros-controls/mujoco_ros2_control/issues/171>`_)
+* Contributors: Christian Rauch, Christoph Fröhlich, Erik Holum, Julia Jia, Lang Qinglin, Marq Rasmussen, Ortisa, Sai Kishor Kothakota, Sebastian Castro, Tianlin Zhang, Daniel Costanzi, msavchen-nasa
+
 0.0.3 (2026-05-01)
 ------------------
 * Add more useful plugins for the mujoco_ros2_control (`#165 <https://github.com/ros-controls/mujoco_ros2_control/issues/165>`_)
