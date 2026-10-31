@@ -449,6 +449,31 @@ INSTANTIATE_TEST_SUITE_P(Interfaces, PluginActuatorCommandInterfaceTest,
                          ::testing::Values(hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY,
                                            hardware_interface::HW_IF_EFFORT));
 
+// A plugin actuator has a single ctrl input and cannot be told which command mode is active, so declaring more than one
+// command interface on its joint is rejected at init rather than silently picking one.
+TEST_F(MujocoSystemInterfaceTest, PluginActuatorWithMultipleCommandInterfacesFailsToInitialize)
+{
+  register_test_actuator_plugin();
+  write_plugin_actuator_test_model();
+  auto hardware_info = create_hardware_info();
+  hardware_info.hardware_parameters["mujoco_model"] = kPluginActuatorTestModelPath;
+
+  hardware_interface::ComponentInfo joint_info;
+  joint_info.name = "plugin_joint";
+  for (const auto* name : { hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY })
+  {
+    hardware_interface::InterfaceInfo command_interface;
+    command_interface.name = name;
+    joint_info.command_interfaces.push_back(command_interface);
+  }
+  hardware_interface::InterfaceInfo state_interface;
+  state_interface.name = hardware_interface::HW_IF_POSITION;
+  joint_info.state_interfaces.push_back(state_interface);
+  hardware_info.joints.push_back(joint_info);
+
+  EXPECT_THROW(initialize_interface(hardware_info), std::runtime_error);
+}
+
 // Pins the read()-side handle sync: without it, this would observe NaN instead of qpos/qvel.
 TEST_F(MujocoSystemInterfaceTest, JointStateInterfacesReflectSimulationAfterRead)
 {
