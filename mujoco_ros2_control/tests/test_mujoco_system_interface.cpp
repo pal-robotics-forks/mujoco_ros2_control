@@ -106,6 +106,13 @@ constexpr const char* kPluginActuatorTestModel = R"(<?xml version="1.0"?>
 </mujoco>
 )";
 
+// Registers a no-op actuator plugin with MuJoCo so models can reference it.
+//
+// Safe to call from every test: the registration happens once per process (the function-local static), because
+// MuJoCo's plugin registry is process-global and never reset between tests. Registering the same name again would
+// be rejected by mjp_registerPlugin and fail the EXPECT_TRUE below.
+// If another test needs a different plugin, give it a different plugin name and its own registration helper rather
+// than reusing this one, so the two cannot collide in the shared registry.
 void register_test_actuator_plugin()
 {
   static const bool registered = []() {
