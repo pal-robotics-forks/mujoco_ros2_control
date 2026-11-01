@@ -48,6 +48,32 @@ Specify it in your URDF and point to a valid MJCF on launch:
      </hardware>
    ...
 
+Overriding parameters with ROS parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every ``<param>`` above (``mujoco_model``, ``headless``, ``sim_speed_factor``, ...) can also be set as a ROS parameter
+on the simulator node, ``mujoco_ros2_control_node``.
+A ROS parameter takes precedence over the URDF value, so the URDF does not need to change per run.
+Either put it in the parameters file passed to ``ros2_control_node``:
+
+.. code-block:: yaml
+
+   mujoco_ros2_control_node:
+     ros__parameters:
+       headless: true
+       sim_speed_factor: 2.0
+
+or pass it on the command line:
+
+.. code-block:: bash
+
+   ros2 run mujoco_ros2_control ros2_control_node --ros-args -p headless:=true -p sim_speed_factor:=2.0
+
+.. note::
+
+   ``pids_config_file`` is only read from the URDF, because it is used to create the node that holds the ROS parameters.
+   ROS parameters are read once while the hardware is initialised, so they cannot be changed at runtime.
+
 Due to compatibility requirements, a slightly modified ``ros2_control`` node is required.
 It is the same executable and accepts the same parameters as the upstream node:
 
