@@ -48,6 +48,67 @@ Specify it in your URDF and point to a valid MJCF on launch:
      </hardware>
    ...
 
+Overriding parameters with ROS parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following ``<hardware><param>`` entries can also be set as a ROS parameter of the same name on the simulator node,
+``mujoco_ros2_control_node``.
+A ROS parameter takes precedence over the URDF value, so the URDF does not need to change per run.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Parameter
+     - Type
+     - Default when unset
+   * - ``mujoco_model``
+     - string
+     - none (``mujoco_model_topic`` is used instead)
+   * - ``mujoco_model_topic``
+     - string
+     - ``/mujoco_robot_description``
+   * - ``headless``
+     - bool
+     - ``false``
+   * - ``sim_speed_factor``
+     - double
+     - ``-1`` (use the rate requested from the App window)
+   * - ``initial_keyframe``
+     - string
+     - empty (no keyframe)
+   * - ``override_start_position_file``
+     - string
+     - empty (not used)
+   * - ``odom_free_joint_name``
+     - string
+     - ``floating_base_joint``
+   * - ``odom_topic``
+     - string
+     - ``/simulator/floating_base_state``
+
+Either put it in the parameters file passed to ``ros2_control_node``:
+
+.. code-block:: yaml
+
+   mujoco_ros2_control_node:
+     ros__parameters:
+       headless: true
+       sim_speed_factor: 2.0
+
+or pass it on the command line:
+
+.. code-block:: bash
+
+   ros2 run mujoco_ros2_control ros2_control_node --ros-args -p headless:=true -p sim_speed_factor:=2.0
+
+.. note::
+
+   Only the parameters in the table above can be overridden. ``pids_config_file`` is read from the URDF only, because it
+   is used to create the node that holds the ROS parameters. Per-joint, per-sensor and per-actuator ``<param>`` entries
+   (for example ``mujoco_type`` or ``mujoco_sensor_name``) are URDF-only.
+   ROS parameters are read once while the hardware is initialised, so they cannot be changed at runtime.
+
 Due to compatibility requirements, a slightly modified ``ros2_control`` node is required.
 It is the same executable and accepts the same parameters as the upstream node:
 
@@ -142,6 +203,36 @@ integrated-velocity dynamics.
 .. note::
 
    The ``torque`` and ``force`` command/state interfaces are semantically equivalent to ``effort`` and map to the same underlying data in the sim.
+
+.. _plugin_actuators:
+
+Plugin Actuators
+~~~~~~~~~~~~~~~~
+
+Actuators driven by a `MuJoCo actuator plugin <https://mujoco.readthedocs.io/en/stable/programming/extension.html>`_ are detected automatically.
+In these instances, the plugin owns the control loop, so the hardware interface does not apply its own PIDs or infer a control mode from the actuator's gain and bias parameters.
+Instead, whichever command interface is declared in the ``ros2_control`` joint is written directly to the actuator's ``ctrl`` input.
+It is entirely up to the plugin to know what to do with the control input.
+
+For instance,
+
+.. code-block:: xml
+
+   <actuator>
+     <plugin joint="joint1" name="joint1" plugin="mujoco.pid" instance="joint1_pid" actdim="2"/>
+   </actuator>
+
+.. code-block:: xml
+
+   <joint name="joint1">
+     <command_interface name="position"/>
+     <state_interface name="position"/>
+     <state_interface name="velocity"/>
+   </joint>
+
+Note that a MuJoCo actuator has a single ``ctrl`` input, and there is no mechanism to inform a plugin that a command mode has changed.
+For this reason a joint driven by a plugin actuator must declare exactly one command interface; declaring more fails initialization with an error.
+Users should understand the limitations and handle their own plugin implementations accordingly.
 
 Grippers and Mimic Joints
 --------------------------
